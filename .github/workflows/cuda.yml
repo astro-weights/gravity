@@ -1,0 +1,51 @@
+name: CUDA build
+
+# Compile-only: hosted runners have no GPU. Weekly, and on pull requests that touch CUDA code.
+on:
+  pull_request:
+    paths: ["ggml/src/ggml-cuda/**", "ggml/include/**", ".github/workflows/cuda.yml"]
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cuda:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container: nvidia/cuda:12.6.2-devel-ubuntu24.04@sha256:738fba0fbdb225b7a2931c58a5c8f03a84d3cd2f6a84975826a157339ef750b8
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build dependencies
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends cmake ninja-build ccache build-essential libssl-dev git
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-cuda-${{ github.sha }}
+          restore-keys: ccache-cuda-
+      # 86 = RTX 30xx. One architecture keeps the build inside the minute budget.
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_FATAL_WARNINGS=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=86-real -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
+            -DGGML_NATIVE=OFF -DGGML_CUDA=ON
+          cmake --build build
+          ccache -s
+      - if: github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-cuda-${{ github.sha }}
