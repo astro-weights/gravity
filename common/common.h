@@ -549,6 +549,8 @@ struct common_params {
 
     bool lora_init_without_apply = false; // only load lora to memory, but do not apply it to ctx (user can manually apply lora later using llama_adapter_lora_apply)
     std::vector<common_adapter_lora_info> lora_adapters; // lora adapter path with user defined scale
+    std::string              model_sha256; // expected sha256 of the model file, lowercase hex (empty = not pinned)
+    std::vector<std::string> lora_sha256;  // expected sha256 of each LoRA adapter file, same order as lora_adapters
 
     std::vector<common_control_vector_load_info> control_vectors; // control vector with user defined scale
 
@@ -1034,6 +1036,13 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 void common_fit_apply(common_params & params, struct llama_model_params & mparams, struct llama_context_params & cparams);
 
 struct llama_model * common_model_load(const std::vector<std::string> & paths, const struct llama_model_params & mparams);
+
+// sha256 of a file, read in chunks; on success out_hex is lowercase hex, on open/read failure returns false and sets out_err
+bool common_file_sha256(const std::string & path, std::string & out_hex, std::string & out_err, uint64_t * out_size = nullptr);
+
+// check the --model-sha256 / --lora-sha256 pins against the files on disk
+// returns false (after LOG_ERR) on any error or mismatch; the caller must not load the model then
+bool common_verify_file_pins(const common_params & params);
 
 // clear LoRA adapters from context, then apply new list of adapters
 void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora);
