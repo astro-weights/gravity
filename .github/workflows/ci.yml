@@ -49,11 +49,11 @@ jobs:
         working-directory: build
         run: ctest -L main --output-on-failure --timeout 900
 
-  # Self-hosted runner on the maintainer's Mac (Apple M3 Pro). Skipped until the repo variable MAC_RUNNER is "on".
+  # Self-hosted runner glitch-mac on the maintainer's Mac (Apple M3 Pro), repo-scoped. Skipped until the repo variable MAC_RUNNER is "on".
   # Rework before this repo goes public (0.3): pull requests from outside must never run on this machine.
   macos:
     if: vars.MAC_RUNNER == 'on'
-    runs-on: [self-hosted, macOS, ARM64, gravity-m3]
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
