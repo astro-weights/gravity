@@ -1,4 +1,5 @@
 #include "server-gravity.h"
+#include "server-context.h"
 
 #include "build-info.h"
 #include "sampling.h"
@@ -149,4 +150,29 @@ json gravity_attach(json res, task_response_type res_type, const json & gravity)
     json & target = res.is_array() ? res.back() : res;
     target["gravity"] = gravity;
     return res;
+}
+
+void gravity_restrict_routes(const common_params & params, server_routes & routes) {
+    if (!params.eval_mode) {
+        return;
+    }
+    const server_http_context::handler_t refuse = [](const server_http_req &) {
+        auto res = std::make_unique<server_http_res>();
+        res->status = 400;
+        res->data = safe_json_to_str({
+            {"error", {
+                {"code", 400},
+                {"message", "not available in --eval-mode: use /completion, /completions, /v1/completions or /v1/chat/completions, "
+                            "and set adapter scales per request"},
+                {"type", "invalid_request_error"},
+            }}
+        });
+        return res;
+    };
+    for (auto * h : {
+            &routes.post_lora_adapters, &routes.post_slots, &routes.post_infill, &routes.post_responses_oai,
+            &routes.post_anthropic_messages, &routes.post_embeddings, &routes.post_embeddings_oai, &routes.post_rerank,
+            &routes.post_systemone, &routes.post_transcriptions_oai, &routes.post_tts, &routes.post_speech_oai }) {
+        *h = refuse;
+    }
 }

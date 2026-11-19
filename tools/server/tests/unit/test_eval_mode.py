@@ -140,3 +140,24 @@ def test_model_sha256_echo(start):
     assert s.get("/props").json()["gravity"]["model_sha256"] == pin
     s2 = start("--eval-mode")
     assert post(s2, "/completion", BASE).json()["gravity"]["model_sha256"] is None
+
+
+REFUSED = [
+    "/lora-adapters", "/slots/0?action=restore", "/infill", "/v1/responses", "/v1/messages",
+    "/embedding", "/v1/embeddings", "/rerank", "/v1/systemone", "/v1/audio/transcriptions", "/tts", "/v1/audio/speech",
+]
+
+
+def test_eval_mode_refuses_unechoed_routes(start):
+    s = start("--eval-mode")
+    for path in REFUSED:
+        res = post(s, path, {"input": "hi", "prompt": "hi", "messages": [{"role": "user", "content": "hi"}]})
+        assert res.status_code == 400, path
+        assert "--eval-mode" in res.json()["error"]["message"], path
+    assert s.get("/lora-adapters").json()[0]["scale"] == 0  # GET still answers
+    assert post(s, "/tokenize", {"content": "hi"}).status_code == 200
+
+
+def test_routes_open_without_eval_mode(start):
+    s = start()
+    assert post(s, "/lora-adapters", [{"id": 0, "scale": 0}]).status_code == 200

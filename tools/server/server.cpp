@@ -664,6 +664,7 @@ static int server_run_instance(common_params & params, server_role & role, commo
         return 1;
     }
 
+    gravity_restrict_routes(params, routes); // gravity: eval mode refuses routes without filled defaults
     server_register_routes(ctx_http, routes);
     server_register_stream_routes(ctx_http,
         server_stream_make_get_handler(),

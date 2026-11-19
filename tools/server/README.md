@@ -360,7 +360,7 @@ Use the pins in single-model mode only. In router mode, pins set in per-model pr
 
 `--eval-mode` makes runs repeatable and the arm of a LoRA comparison explicit. The server runs 1 slot (`-np 1`, also when `-np` > 1 is given, with one warning), no prompt cache, `--cache-reuse 0`, `--cache-ram 0`, no idle-slot caching, no continuous batching, and starts every global adapter scale at 0 (same as `--lora-init-without-apply`).
 
-For `/completion`, `/completions`, `/v1/completions` and `/v1/chat/completions` only (not `/infill`, `/v1/messages`, `/v1/responses`) each field the request does not send is written into the request with a fixed default, and its name is listed in `gravity.filled`. Nothing is refused for a missing field. Fields the request sends are never changed, except `cache_prompt`.
+For `/completion`, `/completions`, `/v1/completions` and `/v1/chat/completions` (and `/chat/completions`) each field the request does not send is written into the request with a fixed default, and its name is listed in `gravity.filled`. Nothing is refused for a missing field. Fields the request sends are never changed, except `cache_prompt`.
 
 | Field | Default | Note |
 |---|---|---|
@@ -373,13 +373,15 @@ For `/completion`, `/completions`, `/v1/completions` and `/v1/chat/completions` 
 
 The defaults are constants in `tools/server/server-gravity.cpp`. Changing one is a new gravity version.
 
+In eval mode every other route that could run the model or load saved KV answers HTTP 400, so no request runs an adapter without the filled defaults and the echo: `POST /lora-adapters` (set scales per request instead), `POST /slots/:id`, `/infill`, `/v1/responses`, `/v1/messages`, `/embedding(s)`, `/v1/embeddings`, `/rerank` and its aliases, `/v1/systemone`, `/v1/audio/transcriptions`, `/tts`, `/v1/audio/speech`. `GET /lora-adapters`, `/props`, `/health`, `/tokenize`, `/detokenize` and `/apply-template` stay open.
+
 Every response of the routes above carries a `gravity` object (the final chunk when streaming), in and out of eval mode:
 
 | Field | Meaning |
 |---|---|
 | `eval_mode` | `true` when `--eval-mode` is set |
 | `build` | `llama_build_info()` |
-| `devices_available` | names of the registered ggml backend devices (the `--device` list if given); not a list of the devices the model runs on |
+| `devices_available` | the ggml backend devices registered in this build (the `--device` list if given). This is not proof of which device ran the model: a model can run on the CPU while a GPU is listed |
 | `model_sha256` | value of `--model-sha256`, else `null` |
 | `lora` | `[{"id", "scale", "sha256"}]`: scale this request ran with, `--lora-sha256` value or `null` |
 | `seed`, `temperature`, `samplers` | values the request ran with |

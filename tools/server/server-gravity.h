@@ -27,5 +27,10 @@ void gravity_set_lora(json & gravity, const common_params & params, const std::v
 // static part for GET /props
 json gravity_props(const common_params & params);
 
+// eval mode: answer 400 on every route that could run the model (or load KV) without filled defaults and the echo:
+// POST /lora-adapters, POST /slots/:id, /infill, /v1/responses, /v1/messages, embeddings, rerank, /v1/systemone, audio
+struct server_routes;
+void gravity_restrict_routes(const common_params & params, server_routes & routes);
+
 // add the object to a final completion result (the last chunk when the result is a list of chunks)
 json gravity_attach(json res, task_response_type res_type, const json & gravity);
