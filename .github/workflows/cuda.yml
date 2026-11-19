@@ -41,7 +41,7 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_FATAL_WARNINGS=ON \
             -DCMAKE_CUDA_ARCHITECTURES=86-real -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
-            -DGGML_NATIVE=OFF -DGGML_CUDA=ON
+            -DGGML_NATIVE=OFF -DGGML_CUDA=ON -DLLAMA_USE_PREBUILT_UI=OFF
           cmake --build build
           ccache -s
       - if: github.event_name != 'pull_request'

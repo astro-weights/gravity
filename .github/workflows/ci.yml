@@ -37,7 +37,7 @@ jobs:
           restore-keys: ccache-linux-
       - name: Build
         run: |
-          cmake -B build -DGGML_NATIVE=OFF -DLLAMA_FATAL_WARNINGS=ON -DGGML_RPC=ON
+          cmake -B build -DGGML_NATIVE=OFF -DLLAMA_FATAL_WARNINGS=ON -DGGML_RPC=ON -DLLAMA_USE_PREBUILT_UI=OFF
           cmake --build build --config Release -j "$(nproc)"
           ccache -s
       - if: github.event_name == 'push'
@@ -61,7 +61,7 @@ jobs:
           persist-credentials: false
       - name: Build (Metal)
         run: |
-          cmake -B build -DGGML_NATIVE=OFF -DLLAMA_FATAL_WARNINGS=ON -DGGML_METAL=ON -DGGML_RPC=ON
+          cmake -B build -DGGML_NATIVE=OFF -DLLAMA_FATAL_WARNINGS=ON -DGGML_METAL=ON -DGGML_RPC=ON -DLLAMA_USE_PREBUILT_UI=OFF
           cmake --build build --config Release -j "$(sysctl -n hw.ncpu)"
       - name: Upstream tests
         working-directory: build
