@@ -147,7 +147,8 @@ bool lora_should_clear_cache(
         const std::vector<common_adapter_lora_info> & current,
         const std::vector<common_adapter_lora_info> & next);
 
-std::map<int, float> parse_lora_request(const json & data);
+// throws std::invalid_argument (-> HTTP 400) unless data is an array of {id, scale} with unique ids in [0, n_adapters)
+std::map<int, float> parse_lora_request(const json & data, size_t n_adapters);
 
 bool are_lora_equal(
         const std::vector<common_adapter_lora_info> & l1,
