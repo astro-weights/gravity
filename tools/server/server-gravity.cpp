@@ -118,6 +118,10 @@ json gravity_props(const common_params & params) {
 }
 
 json gravity_provenance(const common_params & params, const task_params & tp, const gravity_fill & gf) {
+    // outside eval mode responses stay exactly upstream's (clients may filter with response_fields); /props still has the object
+    if (!params.eval_mode) {
+        return json();
+    }
     json g = gravity_props(params);
     g.erase("lora");
     json samplers = json::array();

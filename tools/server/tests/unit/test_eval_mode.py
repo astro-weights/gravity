@@ -55,10 +55,16 @@ def test_flag_fix_without_eval_mode(start):
 def test_no_flag_keeps_scale_1(start):
     s = start()
     assert s.get("/lora-adapters").json()[0]["scale"] == 1
-    g = post(s, "/completion", BASE).json()["gravity"]
-    assert g["eval_mode"] is False
-    assert g["filled"] == [] and g["overridden"] == []
-    assert g["lora"][0]["scale"] == 1
+    # outside eval mode the response is upstream's: no gravity object; /props still has it
+    assert "gravity" not in post(s, "/completion", BASE).json()
+    assert s.get("/props").json()["gravity"]["eval_mode"] is False
+
+
+def test_eval_mode_object_survives_response_fields(start):
+    s = start("--eval-mode")
+    res = post(s, "/completion", {**BASE, "response_fields": ["content"]}).json()
+    assert set(res) == {"content", "gravity"}
+    assert set(res["gravity"]["filled"]) == DEFAULT_FILLED
 
 
 def test_eval_mode_fresh_server(start):
