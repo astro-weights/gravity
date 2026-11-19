@@ -1,0 +1,55 @@
+name: Upstream drift
+
+# Weekly report: how far the base (UPSTREAM.md) is behind upstream llama.cpp, and which upstream changes touch
+# files gravity has changed. Kept in one open issue titled "Upstream drift report".
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare with upstream
+        run: |
+          base=$(grep -oE '[0-9a-f]{40}' UPSTREAM.md | head -n 1)
+          base_tag=$(grep -oE 'Upstream tag \| `v[^`]+`' UPSTREAM.md | grep -oE 'v[^`]+')
+          git fetch -q --no-tags https://github.com/ggml-org/llama.cpp.git +refs/heads/master:refs/upstream/master
+          latest=$(git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp.git 'v*' \
+            | awk '{print $2}' | sed 's|refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          git fetch -q --no-tags https://github.com/ggml-org/llama.cpp.git "+refs/tags/$latest:refs/upstream/latest"
+          ours=$(git diff --name-only "$base" HEAD | grep -vE '^(\.github/|UPSTREAM\.md$)' || true)
+          theirs=$(git diff --name-only "$base" refs/upstream/master)
+          overlap=$(comm -12 <(sort <<<"$ours") <(sort <<<"$theirs") | sed '/^$/d')
+          {
+            echo "Base: \`$base_tag\` (\`${base:0:9}\`). Report date: $(date -u +%F)."
+            echo
+            echo "| | commits behind |"
+            echo "|---|---|"
+            echo "| newest upstream release \`$latest\` | $(git rev-list --count "$base..refs/upstream/latest") |"
+            echo "| upstream \`master\` | $(git rev-list --count "$base..refs/upstream/master") |"
+            echo
+            echo "Files gravity changed: $(sed '/^$/d' <<<"$ours" | wc -l). Of those, changed upstream since the base: $(sed '/^$/d' <<<"$overlap" | wc -l)."
+            if [ -n "$overlap" ]; then echo; echo '```'; echo "$overlap"; echo '```'; fi
+            echo
+            echo "Rebase policy: UPSTREAM.md."
+          } > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Update issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          n=$(gh issue list --state open --search 'in:title "Upstream drift report"' --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then gh issue edit "$n" --body-file report.md; else gh issue create --title "Upstream drift report" --body-file report.md; fi
