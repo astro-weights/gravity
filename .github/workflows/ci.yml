@@ -66,21 +66,20 @@ jobs:
       - if: steps.server.outputs.run == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .llama-cache
+          path: tools/server/tests/tmp
           key: server-models-${{ hashFiles('tools/server/tests/**/*.py') }}
           restore-keys: server-models-
       - name: Server tests
         if: steps.server.outputs.run == 'true'
-        env:
-          LLAMA_CACHE: ${{ github.workspace }}/.llama-cache
+        working-directory: tools/server/tests
+        # Same as tests.sh (fast suite). test_no_ui needs the embedded web UI, which CI builds leave out.
         run: |
-          PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install -q -r tools/server/tests/requirements.txt
-          cd tools/server/tests
-          ./tests.sh
+          PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install -q -r requirements.txt
+          python3 -m pytest --durations=30 -v -x -n 4 --dist=worksteal -m "not slow" --deselect unit/test_basic.py::test_no_ui
       - if: steps.server.outputs.run == 'true' && github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .llama-cache
+          path: tools/server/tests/tmp
           key: server-models-${{ hashFiles('tools/server/tests/**/*.py') }}
 
   # Advisory while private (GitHub Free has no rulesets for private repos): every commit after the base needs git commit -s.
