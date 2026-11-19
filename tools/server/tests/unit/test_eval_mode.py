@@ -84,7 +84,7 @@ def test_eval_mode_filled_and_echoed(start):
     assert g["overridden"] == []
     assert (g["seed"], g["temperature"], g["samplers"]) == (0, 0, ["top_k", "temperature"])
     assert g["lora"] == [{"id": 0, "scale": 0.0, "sha256": None}]
-    assert g["eval_mode"] is True and g["build"] and g["backend"] and g["model_sha256"] is None
+    assert g["eval_mode"] is True and g["build"] and g["devices_available"] and g["model_sha256"] is None
 
     g = post(s, "/completion", ALL).json()["gravity"]
     assert g["filled"] == [] and g["overridden"] == []
@@ -93,6 +93,10 @@ def test_eval_mode_filled_and_echoed(start):
     g = post(s, "/completion", {**BASE, "temperature": 0.5, "cache_prompt": True}).json()["gravity"]
     assert g["overridden"] == ["cache_prompt"]
     assert "temperature" not in g["filled"] and g["temperature"] == 0.5
+
+    res = post(s, "/completion", {**BASE, "cache_prompt": None})
+    assert res.status_code == 200 and res.json()["gravity"]["overridden"] == []
+    assert post(s, "/completion", {**BASE, "cache_prompt": "yes"}).status_code == 400
 
     g = post(s, "/completion", {**BASE, "lora": []}).json()["gravity"]
     assert "lora" in g["filled"] and g["lora"][0]["scale"] == 0

@@ -3870,7 +3870,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--eval-mode"},
-        "reproducible evaluation: 1 slot, no prompt cache, no continuous batching, global LoRA scales 0; absent request fields are filled and echoed in response \"gravity.filled\": "
+        "reproducible evaluation: 1 slot, no prompt cache (also no --cache-ram, no idle-slot caching), no continuous batching, global LoRA scales 0; absent request fields are filled and echoed in response \"gravity.filled\": "
         "seed=0, temperature=0, samplers=[top_k,temperature], top_k=1, lora=every adapter at scale 0 (also for \"lora\": []); cache_prompt=true is forced to false",
         [](common_params & params) {
             params.eval_mode = true;

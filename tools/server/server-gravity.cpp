@@ -11,9 +11,12 @@ static const char * GRAVITY_SAMPLERS[]  = { "top_k", "temperature" };
 
 void gravity_prepare_params(common_params & params) {
     if (params.eval_mode) {
-        if (params.n_parallel > 1 || params.n_cache_reuse > 0) {
-            SRV_WRN("--eval-mode overrides n_parallel = %d and n_cache_reuse = %d to 1 and 0\n", params.n_parallel, params.n_cache_reuse);
+        if (params.n_parallel > 1 || params.n_cache_reuse > 0 || params.cache_ram_mib != 0 || params.cache_idle_slots) {
+            SRV_WRN("--eval-mode overrides n_parallel = %d, n_cache_reuse = %d, cache_ram = %d MiB, cache_idle_slots = %d to 1, 0, 0, 0\n",
+                    params.n_parallel, params.n_cache_reuse, params.cache_ram_mib, params.cache_idle_slots);
         }
+        params.cache_ram_mib    = 0;
+        params.cache_idle_slots = false;
         params.n_parallel    = 1;
         params.n_cache_reuse = 0;
         params.cache_prompt  = false;
@@ -31,9 +34,14 @@ static bool is_absent(const json & body, const char * key) {
     return !body.contains(key) || body.at(key).is_null();
 }
 
-gravity_fill gravity_fill_request(const common_params & params, const json & data) {
+static bool gravity_covers(server_task_type type, task_response_type res_type) {
+    return type == SERVER_TASK_TYPE_COMPLETION &&
+           (res_type == TASK_RESPONSE_TYPE_NONE || res_type == TASK_RESPONSE_TYPE_OAI_CMPL || res_type == TASK_RESPONSE_TYPE_OAI_CHAT);
+}
+
+gravity_fill gravity_fill_request(const common_params & params, const json & data, server_task_type type, task_response_type res_type) {
     gravity_fill gf;
-    if (!params.eval_mode || !data.is_object()) {
+    if (!params.eval_mode || !data.is_object() || !gravity_covers(type, res_type)) {
         return gf;
     }
     gf.body = data;
@@ -59,7 +67,8 @@ gravity_fill gravity_fill_request(const common_params & params, const json & dat
         gf.filled.push_back("lora");
     }
 
-    if (gf.body.value("cache_prompt", false)) {
+    // non-bool values go on to the schema, which returns its own error
+    if (gf.body.contains("cache_prompt") && gf.body["cache_prompt"].is_boolean() && gf.body["cache_prompt"].get<bool>()) {
         gf.body["cache_prompt"] = false;
         gf.overridden.push_back("cache_prompt");
     }
@@ -70,7 +79,7 @@ static json pin_or_null(const std::string & pin) {
     return pin.empty() ? json(nullptr) : json(pin);
 }
 
-static json backend_names(const common_params & params) {
+static json devices_available(const common_params & params) {
     json names = json::array();
     if (params.devices.empty()) {
         for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
@@ -101,7 +110,7 @@ json gravity_props(const common_params & params) {
     return {
         {"eval_mode",    params.eval_mode},
         {"build",        std::string(llama_build_info())},
-        {"backend",      backend_names(params)},
+        {"devices_available", devices_available(params)},
         {"model_sha256", pin_or_null(params.model_sha256)},
         {"lora",         lora},
     };

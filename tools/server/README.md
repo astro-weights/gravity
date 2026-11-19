@@ -249,7 +249,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--skip-chat-parsing, --no-skip-chat-parsing` | force a pure content parser, even if a Jinja template is specified; model will output everything in the content section, including any reasoning and/or tool calls (default: disabled)<br/>(env: LLAMA_ARG_SKIP_CHAT_PARSING) |
 | `--prefill-assistant, --no-prefill-assistant` | whether to prefill the assistant's response if the last message is an assistant message (default: prefill enabled)<br/>when this flag is set, if the last message is an assistant message then it will be treated as a full message and not prefilled<br/><br/>(env: LLAMA_ARG_PREFILL_ASSISTANT) |
 | `-sps, --slot-prompt-similarity SIMILARITY` | how much the prompt of a request must match the prompt of a slot in order to use that slot (default: 0.10, 0.0 = disabled) |
-| `--eval-mode` | reproducible evaluation: 1 slot, no prompt cache, no continuous batching, global LoRA scales 0; absent request fields are filled and echoed in response "gravity.filled": seed=0, temperature=0, samplers=[top_k,temperature], top_k=1, lora=every adapter at scale 0 (also for "lora": []); cache_prompt=true is forced to false<br/>(env: LLAMA_ARG_EVAL_MODE) |
+| `--eval-mode` | reproducible evaluation: 1 slot, no prompt cache (also no --cache-ram, no idle-slot caching), no continuous batching, global LoRA scales 0; absent request fields are filled and echoed in response "gravity.filled": seed=0, temperature=0, samplers=[top_k,temperature], top_k=1, lora=every adapter at scale 0 (also for "lora": []); cache_prompt=true is forced to false<br/>(env: LLAMA_ARG_EVAL_MODE) |
 | `--lora-init-without-apply` | load LoRA adapters without applying them: all global adapter scales start at 0 (apply later via POST /lora-adapters) (default: disabled) |
 | `--sleep-idle-seconds SECONDS` | number of seconds of idleness after which the server will sleep (default: -1; -1 = disabled) |
 | `--log-prompts-dir PATH` | Log prompts to directory (auto-created if not present; only used for debugging, default: disabled) |
@@ -358,9 +358,9 @@ Use the pins in single-model mode only. In router mode, pins set in per-model pr
 
 ### Eval mode and the `gravity` object
 
-`--eval-mode` makes runs repeatable and the arm of a LoRA comparison explicit. The server runs 1 slot (`-np 1`, also when `-np` > 1 is given, with one warning), no prompt cache, `--cache-reuse 0`, no continuous batching, and starts every global adapter scale at 0 (same as `--lora-init-without-apply`).
+`--eval-mode` makes runs repeatable and the arm of a LoRA comparison explicit. The server runs 1 slot (`-np 1`, also when `-np` > 1 is given, with one warning), no prompt cache, `--cache-reuse 0`, `--cache-ram 0`, no idle-slot caching, no continuous batching, and starts every global adapter scale at 0 (same as `--lora-init-without-apply`).
 
-For `/completion`, `/completions`, `/v1/completions` and `/v1/chat/completions` (and the other routes that share the completion path) each field the request does not send is written into the request with a fixed default, and its name is listed in `gravity.filled`. Nothing is refused for a missing field. Fields the request sends are never changed, except `cache_prompt`.
+For `/completion`, `/completions`, `/v1/completions` and `/v1/chat/completions` only (not `/infill`, `/v1/messages`, `/v1/responses`) each field the request does not send is written into the request with a fixed default, and its name is listed in `gravity.filled`. Nothing is refused for a missing field. Fields the request sends are never changed, except `cache_prompt`.
 
 | Field | Default | Note |
 |---|---|---|
@@ -379,14 +379,14 @@ Every response of the routes above carries a `gravity` object (the final chunk w
 |---|---|
 | `eval_mode` | `true` when `--eval-mode` is set |
 | `build` | `llama_build_info()` |
-| `backend` | names of the ggml backend devices (`--device` list, or all registered devices) |
+| `devices_available` | names of the registered ggml backend devices (the `--device` list if given); not a list of the devices the model runs on |
 | `model_sha256` | value of `--model-sha256`, else `null` |
 | `lora` | `[{"id", "scale", "sha256"}]`: scale this request ran with, `--lora-sha256` value or `null` |
 | `seed`, `temperature`, `samplers` | values the request ran with |
 | `filled` | field names filled by default (always `[]` outside eval mode) |
 | `overridden` | field names forced by eval mode (always `[]` outside eval mode) |
 
-`GET /props` has `gravity` with `eval_mode`, `build`, `backend`, `model_sha256` and `lora` (scales at startup; later `POST /lora-adapters` changes are not shown there, see the per-response object).
+`GET /props` has `gravity` with `eval_mode`, `build`, `devices_available`, `model_sha256` and `lora` (scales at startup; later `POST /lora-adapters` changes are not shown there, see the per-response object).
 
 ### Multimodal support
 

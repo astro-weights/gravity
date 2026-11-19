@@ -5343,7 +5343,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             const common_chat_session & chat_session) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
-    const gravity_fill gf = gravity_fill_request(params, data_in);
+    const gravity_fill gf = gravity_fill_request(params, data_in, type, res_type);
     const json & data = gf.body.is_null() ? data_in : gf.body;
 
     auto res = create_response();
