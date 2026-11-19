@@ -3869,6 +3869,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--eval-mode"},
+        "reproducible evaluation: 1 slot, no prompt cache, no continuous batching, global LoRA scales 0; absent request fields are filled and echoed in response \"gravity.filled\": "
+        "seed=0, temperature=0, samplers=[top_k,temperature], top_k=1, lora=every adapter at scale 0 (also for \"lora\": []); cache_prompt=true is forced to false",
+        [](common_params & params) {
+            params.eval_mode = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_EVAL_MODE"));
+    add_opt(common_arg(
         {"--sleep-idle-seconds"}, "SECONDS",
         string_format("number of seconds of idleness after which the server will sleep (default: %d; -1 = disabled)", params.sleep_idle_seconds),
         [](common_params & params, int value) {

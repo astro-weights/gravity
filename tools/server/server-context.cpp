@@ -5,6 +5,7 @@
 #include "server-chat.h"
 #include "server-common.h"
 #include "server-decision.h"
+#include "server-gravity.h"
 #include "server-http.h"
 #include "server-task.h"
 #include "server-queue.h"
@@ -2459,6 +2460,7 @@ private:
         }
 
         res->generation_params = slot.task->params; // copy the parameters
+        gravity_set_lora(res->generation_params.gravity, params_base, slot.lora);
 
         queue_results.send(std::move(res));
     }
@@ -5335,11 +5337,14 @@ void server_context::set_state_callback(server_state_callback_t callback) {
 std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             const server_http_req & req,
             server_task_type type,
-            const json & data,
+            const json & data_in,
             const std::vector<raw_buffer> & files,
             task_response_type res_type,
             const common_chat_session & chat_session) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
+
+    const gravity_fill gf = gravity_fill_request(params, data_in);
+    const json & data = gf.body.is_null() ? data_in : gf.body;
 
     auto res = create_response();
     auto completion_id = gen_chatcmplid();
@@ -5396,6 +5401,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     params,
                     meta->logit_bias_eog,
                     data);
+            task.params.gravity = gravity_provenance(params, task.params, gf);
 
             task.apply_chat_session(chat_session);
 
@@ -5706,6 +5712,7 @@ static json get_res_props(const server_context_meta & meta, const common_params 
     json props = {
         { "default_generation_settings", default_generation_settings_for_props },
         { "total_slots",                 params.n_parallel },
+        { "gravity",                     gravity_props(params) },
         { "model_alias",                 meta.model_name },
         { "model_ftype",                 meta.model_ftype },
         { "model_path",                  meta.model_path },
