@@ -9,6 +9,7 @@
 #include "arg.h"
 #include "build-info.h"
 #include "common.h"
+#include "file-pins.h"
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
@@ -695,6 +696,15 @@ static int server_run_instance(common_params & params, server_role & role, commo
         });
     }
 
+    // check the sha256 pins before anything reads the model or adapter files
+    // embedded in llama-cli (no pin options there): skip the "not pinned" warnings
+    if (!common_verify_file_pins(params, /* warn_unpinned */ opts.resolve_model)) {
+        clean_up();
+        ctx_http.join();
+        SRV_ERR("%s", "exiting due to sha256 pin check failure\n");
+        return 1;
+    }
+
     if (!ctx_server.load_model(params)) {
         clean_up();
         ctx_http.join();
@@ -776,6 +786,12 @@ static int server_run(common_params & params, int argc, char ** argv, server_rol
     }
 
     const server_role_type role_type = server_role_detect(params, role);
+
+    // a router loads models per request, from other args: a pin given here would check nothing
+    if (role_type == SERVER_ROLE_ROUTER && (!params.model_sha256.empty() || !params.lora_sha256.empty())) {
+        SRV_ERR("%s", "--model-sha256 / --lora-sha256 are not supported in router mode\n");
+        return 1;
+    }
 
     // only an instance loads a model; the others must not touch the GPU, so skip the
     // device enumeration for them and the CUDA primary context stays uncreated

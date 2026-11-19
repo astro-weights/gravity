@@ -82,6 +82,8 @@ add_library(${TARGET}
     fit.h
     file-lock.cpp
     file-lock.h
+    file-pins.cpp
+    file-pins.h
     hf-cache.cpp
     hf-cache.h
     http.h
@@ -154,6 +156,7 @@ endif()
 
 target_link_libraries(${TARGET} PUBLIC  llama-common-base)
 target_link_libraries(${TARGET} PRIVATE cpp-httplib)
+target_link_libraries(${TARGET} PRIVATE vendor::hash)
 
 if (LLAMA_LLGUIDANCE)
     include(ExternalProject)

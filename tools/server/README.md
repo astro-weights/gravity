@@ -188,8 +188,10 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--video-fps N` | target video frame rate (default: 4.0)<br/>(env: LLAMA_ARG_VIDEO_FPS) |
 | `--video-timestamp-interval N` | interval in milliseconds between text timestamps (default: 5000)<br/>(env: LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL) |
 | `--video-ffmpeg-dir DIR` | path to the directory containing ffmpeg and ffprobe (default: search in PATH)<br/>(env: LLAMA_ARG_VIDEO_FFMPEG_DIR) |
+| `--lora-sha256 HEX` | sha256 of one LoRA adapter file (64 hex digits); give once per --lora / --lora-scaled entry, in the same order<br/>the server refuses to start when a file does not match (repeatable, or use comma-separated values) |
 | `-a, --alias STRING` | set model name aliases, comma-separated (to be used by API)<br/>(env: LLAMA_ARG_ALIAS) |
 | `--tags STRING` | set model tags, comma-separated (informational, not used for routing)<br/>(env: LLAMA_ARG_TAGS) |
+| `--model-sha256 HEX` | sha256 of the model file (64 hex digits); the server refuses to start when the file does not match<br/>not supported for split models and in router mode<br/>(env: LLAMA_ARG_MODEL_SHA256) |
 | `--embd-normalize N` | normalisation for embeddings (default: 2) (-1=none, 0=max absolute int16, 1=taxicab, 2=euclidean, >2=p-norm) |
 | `--host HOST` | IP addresses to listen on, comma-separated, or UNIX socket paths ending in .sock; with multiple TCP addresses, :: binds IPv6 only; overlapping addresses result in undefined behavior (default: 127.0.0.1)<br/>(env: LLAMA_ARG_HOST) |
 | `--port PORT` | port to listen (default: 9931)<br/>(env: LLAMA_ARG_PORT) |
@@ -344,6 +346,14 @@ services:
       LLAMA_ARG_ENDPOINT_METRICS: 1
       LLAMA_ARG_PORT: 8080
 ```
+
+### File hash pins
+
+`--model-sha256` and `--lora-sha256` make the server hash the model and adapter files at startup and exit with an error, before anything is loaded, when a hash does not match. Without them the server logs a `not pinned` warning and starts as before.
+
+Not covered: a file swapped after the check and before the load (needs local write access to the file), the reload after the sleep state, and other files such as `--mmproj` or a draft model.
+
+Use the pins in single-model mode only. In router mode, pins set in per-model preset sections are not checked before the router's memory-measure step reads the GGUF metadata.
 
 ### Multimodal support
 

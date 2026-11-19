@@ -549,6 +549,8 @@ struct common_params {
 
     bool lora_init_without_apply = false; // only load lora to memory, but do not apply it to ctx (user can manually apply lora later using llama_adapter_lora_apply)
     std::vector<common_adapter_lora_info> lora_adapters; // lora adapter path with user defined scale
+    std::string              model_sha256; // expected sha256 of the model file, lowercase hex (empty = not pinned)
+    std::vector<std::string> lora_sha256;  // expected sha256 of each LoRA adapter file, same order as lora_adapters
 
     std::vector<common_control_vector_load_info> control_vectors; // control vector with user defined scale
 

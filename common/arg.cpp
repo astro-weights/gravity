@@ -12,6 +12,7 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "preset.h"
+#include "file-pins.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -2961,6 +2962,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         // we define this arg on both COMMON and EXPORT_LORA, so when showing help message of export-lora, it will be categorized as "example-specific" arg
     ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_EXPORT_LORA}));
     add_opt(common_arg(
+        {"--lora-sha256"}, "HEX",
+        "sha256 of one LoRA adapter file (64 hex digits); give once per --lora / --lora-scaled entry, in the same order\n"
+        "the server refuses to start when a file does not match (repeatable, or use comma-separated values)",
+        [](common_params & params, const std::string & value) {
+            for (const auto & item : parse_csv_row(value)) {
+                params.lora_sha256.push_back(common_parse_sha256_hex(item));
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--control-vector"}, "FNAME",
         "add a control vector\nnote: use comma-separated values to add multiple control vectors",
         [](common_params & params, const std::string & value) {
@@ -3024,6 +3035,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.model.path = value;
         }
     ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_EXPORT_LORA, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_MODEL"));
+    add_opt(common_arg(
+        {"--model-sha256"}, "HEX",
+        "sha256 of the model file (64 hex digits); the server refuses to start when the file does not match\n"
+        "not supported for split models and in router mode",
+        [](common_params & params, const std::string & value) {
+            params.model_sha256 = common_parse_sha256_hex(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODEL_SHA256"));
     add_opt(common_arg(
         {"--ple", "--shard"}, "FNAME,...",
         "extra GGUF shards for the model, comma separated; may be given more than once\n"
