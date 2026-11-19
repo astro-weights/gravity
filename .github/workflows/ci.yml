@@ -48,6 +48,40 @@ jobs:
       - name: Upstream tests
         working-directory: build
         run: ctest -L main --output-on-failure --timeout 900
+      # Server tests (tools/server/tests fast suite, small HF models) only when the server or this workflow changed: about 5 min.
+      - name: Server changed?
+        id: server
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          run=true
+          if [ "${GITHUB_EVENT_NAME}" != workflow_dispatch ] && [ -n "$BASE" ] && [ "$BASE" != 0000000000000000000000000000000000000000 ]; then
+            files=$(gh api "repos/$REPO/compare/$BASE...$HEAD" --jq '.files[].filename')
+            grep -qE '^(tools/server/|\.github/workflows/ci\.yml$)' <<<"$files" || run=false
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      - if: steps.server.outputs.run == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .llama-cache
+          key: server-models-${{ hashFiles('tools/server/tests/**/*.py') }}
+          restore-keys: server-models-
+      - name: Server tests
+        if: steps.server.outputs.run == 'true'
+        env:
+          LLAMA_CACHE: ${{ github.workspace }}/.llama-cache
+        run: |
+          PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install -q -r tools/server/tests/requirements.txt
+          cd tools/server/tests
+          ./tests.sh
+      - if: steps.server.outputs.run == 'true' && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .llama-cache
+          key: server-models-${{ hashFiles('tools/server/tests/**/*.py') }}
 
   # Advisory while private (GitHub Free has no rulesets for private repos): every commit after the base needs git commit -s.
   dco:
