@@ -27,6 +27,8 @@ add_library(${TARGET} STATIC
     server-mcp.h
     server-schema.cpp
     server-schema.h
+    server-gravity.cpp
+    server-gravity.h
 )
 
 if (BUILD_SHARED_LIBS)

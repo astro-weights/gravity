@@ -1,5 +1,6 @@
 #include "server-connect.h"
 #include "server-context.h"
+#include "server-gravity.h"
 #include "server-http.h"
 #include "server-models.h"
 #include "server-cors-proxy.h"
@@ -118,6 +119,8 @@ static server_role_type server_role_detect(const common_params & params, server_
 // adjust the params for the role; returns false on a configuration error
 static bool server_prepare_params(common_params & params, server_role_type role_type) {
     if (role_type != SERVER_ROLE_ROUTER) {
+        gravity_prepare_params(params);
+
         // validate batch size for embeddings
         // embeddings require all tokens to be processed in a single ubatch
         // see https://github.com/ggml-org/llama.cpp/issues/12836
@@ -661,6 +664,7 @@ static int server_run_instance(common_params & params, server_role & role, commo
         return 1;
     }
 
+    gravity_restrict_routes(params, routes); // gravity: eval mode refuses routes without filled defaults
     server_register_routes(ctx_http, routes);
     server_register_stream_routes(ctx_http,
         server_stream_make_get_handler(),

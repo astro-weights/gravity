@@ -9,6 +9,7 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "server-common.h"
+#include "server-gravity.h"
 
 #include <sstream>
 
@@ -310,6 +311,10 @@ std::vector<unsigned char> completion_token_output::str_to_bytes(const std::stri
 // server_task_result_cmpl_final
 //
 json server_task_result_cmpl_final::to_json() {
+    return gravity_attach(to_json_body(), res_type, generation_params.gravity);
+}
+
+json server_task_result_cmpl_final::to_json_body() {
     GGML_ASSERT(is_updated && "update() must be called before to_json()");
     switch (res_type) {
         case TASK_RESPONSE_TYPE_NONE:

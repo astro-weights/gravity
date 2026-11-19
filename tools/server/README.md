@@ -249,7 +249,8 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--skip-chat-parsing, --no-skip-chat-parsing` | force a pure content parser, even if a Jinja template is specified; model will output everything in the content section, including any reasoning and/or tool calls (default: disabled)<br/>(env: LLAMA_ARG_SKIP_CHAT_PARSING) |
 | `--prefill-assistant, --no-prefill-assistant` | whether to prefill the assistant's response if the last message is an assistant message (default: prefill enabled)<br/>when this flag is set, if the last message is an assistant message then it will be treated as a full message and not prefilled<br/><br/>(env: LLAMA_ARG_PREFILL_ASSISTANT) |
 | `-sps, --slot-prompt-similarity SIMILARITY` | how much the prompt of a request must match the prompt of a slot in order to use that slot (default: 0.10, 0.0 = disabled) |
-| `--lora-init-without-apply` | load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: disabled) |
+| `--eval-mode` | reproducible evaluation: 1 slot, no prompt cache (also no --cache-ram, no idle-slot caching), no continuous batching, global LoRA scales 0; absent request fields are filled and echoed in response "gravity.filled": seed=0, temperature=0, samplers=[top_k,temperature], top_k=1, lora=every adapter at scale 0 (also for "lora": []); cache_prompt=true is forced to false<br/>(env: LLAMA_ARG_EVAL_MODE) |
+| `--lora-init-without-apply` | load LoRA adapters without applying them: all global adapter scales start at 0 (apply later via POST /lora-adapters) (default: disabled) |
 | `--sleep-idle-seconds SECONDS` | number of seconds of idleness after which the server will sleep (default: -1; -1 = disabled) |
 | `--log-prompts-dir PATH` | Log prompts to directory (auto-created if not present; only used for debugging, default: disabled) |
 | `--spec-draft-hf, -hfd, -hfrd, --hf-repo-draft <user>/<model>[:quant]` | Same as --hf-repo, but for the draft model (default: unused)<br/>(env: LLAMA_ARG_SPEC_DRAFT_HF_REPO) |
@@ -354,6 +355,40 @@ services:
 Not covered: a file swapped after the check and before the load (needs local write access to the file), the reload after the sleep state, and other files such as `--mmproj` or a draft model.
 
 Use the pins in single-model mode only. In router mode, pins set in per-model preset sections are not checked before the router's memory-measure step reads the GGUF metadata.
+
+### Eval mode and the `gravity` object
+
+`--eval-mode` makes runs repeatable and the arm of a LoRA comparison explicit. The server runs 1 slot (`-np 1`, also when `-np` > 1 is given, with one warning), no prompt cache, `--cache-reuse 0`, `--cache-ram 0`, no idle-slot caching, no continuous batching, and starts every global adapter scale at 0 (same as `--lora-init-without-apply`).
+
+For `/completion`, `/completions`, `/v1/completions` and `/v1/chat/completions` (and `/chat/completions`) each field the request does not send is written into the request with a fixed default, and its name is listed in `gravity.filled`. Nothing is refused for a missing field. Fields the request sends are never changed, except `cache_prompt`.
+
+| Field | Default | Note |
+|---|---|---|
+| `seed` | `0` | |
+| `temperature` | `0` | |
+| `samplers` | `["top_k", "temperature"]` | |
+| `top_k` | `1` | |
+| `lora` | every loaded adapter at `scale` 0 | also used for `"lora": []`; with no adapters loaded nothing is filled |
+| `cache_prompt` | forced `false` | a request sending `true` is changed and listed in `gravity.overridden` |
+
+The defaults are constants in `tools/server/server-gravity.cpp`. Changing one is a new gravity version.
+
+In eval mode every other route that could run the model or load saved KV answers HTTP 400, so no request runs an adapter without the filled defaults and the echo: `POST /lora-adapters` (set scales per request instead), `POST /slots/:id`, `/infill`, `/v1/responses`, `/v1/messages`, `/embedding(s)`, `/v1/embeddings`, `/rerank` and its aliases, `/v1/systemone`, `/v1/audio/transcriptions`, `/tts`, `/v1/audio/speech`. `GET /lora-adapters`, `/props`, `/health`, `/tokenize`, `/detokenize` and `/apply-template` stay open.
+
+Every response of the routes above carries a `gravity` object (the final chunk when streaming), in and out of eval mode:
+
+| Field | Meaning |
+|---|---|
+| `eval_mode` | `true` when `--eval-mode` is set |
+| `build` | `llama_build_info()` |
+| `devices_available` | the ggml backend devices registered in this build (the `--device` list if given). This is not proof of which device ran the model: a model can run on the CPU while a GPU is listed |
+| `model_sha256` | value of `--model-sha256`, else `null` |
+| `lora` | `[{"id", "scale", "sha256"}]`: scale this request ran with, `--lora-sha256` value or `null` |
+| `seed`, `temperature`, `samplers` | values the request ran with |
+| `filled` | field names filled by default (always `[]` outside eval mode) |
+| `overridden` | field names forced by eval mode (always `[]` outside eval mode) |
+
+`GET /props` has `gravity` with `eval_mode`, `build`, `devices_available`, `model_sha256` and `lora` (scales at startup; later `POST /lora-adapters` changes are not shown there, see the per-response object).
 
 ### Multimodal support
 
@@ -1318,7 +1353,7 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
 
 This endpoint returns the loaded LoRA adapters. You can add adapters using `--lora` when starting the server, for example: `--lora my_adapter_1.gguf --lora my_adapter_2.gguf ...`
 
-By default, all adapters will be loaded with scale set to 1. To initialize all adapters scale to 0, add `--lora-init-without-apply`
+By default, all adapters will be loaded with scale set to 1. To initialize all adapters scale to 0, add `--lora-init-without-apply` (gravity: the global scales really start at 0 and a request without `lora` runs the base model)
 
 Please note that this value will be overwritten by the `lora` field for each request.
 

@@ -96,6 +96,8 @@ struct task_params {
 
     std::map<int, float> lora; // mapping adapter ID -> scale
 
+    json gravity; // provenance object of the response, see server-gravity.h
+
     std::vector<std::string> antiprompt;
     std::vector<std::string> response_fields;
 
@@ -449,6 +451,8 @@ struct server_task_result_cmpl_final : server_task_result {
     }
 
     virtual json to_json() override;
+
+    json to_json_body();
 
     virtual void update(task_result_state & state) override {
         is_updated = true;
