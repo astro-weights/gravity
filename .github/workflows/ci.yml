@@ -13,7 +13,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Budget (private repo, GitHub Free): hosted Linux only, about 1,200 min/month across all workflows. No hosted macOS.
+# Budget (private repo, GitHub Free): hosted Linux about 1,200 min/month; hosted macOS only on release tags (macos.yml). No self-hosted runners.
 jobs:
   linux:
     runs-on: ubuntu-24.04
@@ -45,24 +45,6 @@ jobs:
         with:
           path: .ccache
           key: ccache-linux-${{ github.sha }}
-      - name: Upstream tests
-        working-directory: build
-        run: ctest -L main --output-on-failure --timeout 900
-
-  # Self-hosted runner glitch-mac on the maintainer's Mac (Apple M3 Pro), repo-scoped. Skipped until the repo variable MAC_RUNNER is "on".
-  # Rework before this repo goes public (0.3): pull requests from outside must never run on this machine.
-  macos:
-    if: vars.MAC_RUNNER == 'on'
-    runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Build (Metal)
-        run: |
-          cmake -B build -DGGML_NATIVE=OFF -DLLAMA_FATAL_WARNINGS=ON -DGGML_METAL=ON -DGGML_RPC=ON -DLLAMA_USE_PREBUILT_UI=OFF
-          cmake --build build --config Release -j "$(sysctl -n hw.ncpu)"
       - name: Upstream tests
         working-directory: build
         run: ctest -L main --output-on-failure --timeout 900

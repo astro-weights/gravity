@@ -1,0 +1,29 @@
+name: macOS build
+
+# Hosted macOS on release tags only. Private repo on GitHub Free: macOS costs $0.062/min against the
+# $12/month allowance (about 193 min), so one run is capped at 25 min. Never on a self-hosted runner.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build (Metal)
+        run: |
+          cmake -B build -DGGML_NATIVE=OFF -DLLAMA_FATAL_WARNINGS=ON -DGGML_METAL=ON -DGGML_RPC=ON -DLLAMA_USE_PREBUILT_UI=OFF
+          cmake --build build --config Release -j "$(sysctl -n hw.ncpu)"
+      - name: Smoke test
+        run: |
+          build/bin/llama-cli --version
+          cd build
+          # Same exclusions as upstream's hosted macOS job.
+          ctest -L main -E "test-llama-archs|test-llama-context|test-speculative-rejection-sampling" --output-on-failure --timeout 300
