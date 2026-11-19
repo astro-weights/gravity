@@ -6654,16 +6654,12 @@ void server_routes::init_routes() {
     this->post_lora_adapters = [this](const server_http_req & req) {
         auto res = create_response();
         const json body = json::parse(req.body);
-        if (!body.is_array()) {
-            res->error(format_error_response("Request body must be an array", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
 
         auto & rd = res->rd;
         {
             server_task task(SERVER_TASK_TYPE_SET_LORA);
             task.id = rd.get_new_id();
-            task.set_lora = parse_lora_request(body);
+            task.set_lora = parse_lora_request(body, params.lora_adapters.size());
             rd.post_task(std::move(task));
         }
 

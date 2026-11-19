@@ -315,14 +315,57 @@ bool lora_should_clear_cache(
         !lora_all_alora(next));
 }
 
-std::map<int, float> parse_lora_request(const json & data) {
+std::map<int, float> parse_lora_request(const json & data, size_t n_adapters) {
+    if (!data.is_array()) {
+        throw std::invalid_argument("lora: must be an array of objects with 'id' and 'scale' fields");
+    }
+
     std::map<int, float> lora;
 
-    // set value
-    for (const auto & entry : data) {
-        int id      = json_value(entry, "id", -1);
-        float scale = json_value(entry, "scale", 0.0f);
-        lora[id] = scale;
+    for (size_t i = 0; i < data.size(); ++i) {
+        const auto & entry = data[i];
+        const std::string pfx = string_format("lora[%zu]: ", i);
+
+        if (!entry.is_object()) {
+            throw std::invalid_argument(pfx + "must be an object with 'id' and 'scale' fields");
+        }
+        for (const auto & [key, _] : entry.items()) {
+            if (key != "id" && key != "scale") {
+                throw std::invalid_argument(pfx + "unknown key '" + key + "'");
+            }
+        }
+        if (!entry.contains("id")) {
+            throw std::invalid_argument(pfx + "missing 'id'");
+        }
+        if (!entry.contains("scale")) {
+            throw std::invalid_argument(pfx + "missing 'scale'");
+        }
+
+        const auto & jid = entry.at("id");
+        if (!jid.is_number()) {
+            throw std::invalid_argument(pfx + "'id' must be an integer");
+        }
+        const double did = jid.get<double>();
+        if (did != std::floor(did)) {
+            throw std::invalid_argument(pfx + "'id' must be an integer, got " + jid.dump());
+        }
+        if (did < 0 || did >= (double) n_adapters) {
+            throw std::invalid_argument(pfx + "id " + jid.dump() + string_format(" out of range (%zu adapters loaded)", n_adapters));
+        }
+        const int id = jid.get<int>();
+
+        const auto & jscale = entry.at("scale");
+        if (!jscale.is_number()) {
+            throw std::invalid_argument(pfx + "'scale' must be a number");
+        }
+        const float scale = jscale.get<float>();
+        if (!std::isfinite(scale)) {
+            throw std::invalid_argument(pfx + "'scale' must be finite");
+        }
+
+        if (!lora.emplace(id, scale).second) {
+            throw std::invalid_argument(pfx + string_format("duplicate id %d", id));
+        }
     }
 
     return lora;
