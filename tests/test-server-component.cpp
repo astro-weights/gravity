@@ -268,15 +268,29 @@ static void test_lora_helpers(testing & t) {
     t.test("parse_lora_request", [](testing & t) {
         auto res = parse_lora_request(json::array({
             json{{"id", 0}, {"scale", 0.5}},
-            json{{"id", 2}, {"scale", 1.0}},
-            json{{"id", 0}, {"scale", 0.25}}, // last one wins
-        }));
+            json{{"id", 2}, {"scale", 1}},
+        }), 3);
         t.assert_equal("count", (size_t) 2, res.size());
-        t.assert_equal("id 0", 0.25f, res.at(0));
-        t.assert_equal("id 2", 1.0f,  res.at(2));
+        t.assert_equal("id 0", 0.5f, res.at(0));
+        t.assert_equal("id 2", 1.0f, res.at(2));
+        t.assert_equal("empty list", (size_t) 0, parse_lora_request(json::array(), 3).size());
 
-        auto defaults = parse_lora_request(json::array({json::object()}));
-        t.assert_equal("default id/scale", 0.0f, defaults.at(-1));
+        // gravity: malformed lists are rejected (upstream filled defaults and let the last duplicate win)
+        const json bad[] = {
+            json::object(),                                                          // not an array
+            json::array({json::object()}),                                           // missing id and scale
+            json::array({json{{"id", 0}, {"scale", 0.5}}, json{{"id", 0}, {"scale", 1}}}), // duplicate id
+            json::array({json{{"id", 3}, {"scale", 1}}}),                            // out of range
+        };
+        for (const auto & b : bad) {
+            bool thrown = false;
+            try {
+                parse_lora_request(b, 3);
+            } catch (const std::invalid_argument &) {
+                thrown = true;
+            }
+            t.assert_true("rejects " + b.dump(), thrown);
+        }
     });
 
     t.test("are_lora_equal", [&](testing & t) {
