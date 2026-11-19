@@ -9,6 +9,7 @@
 #include "arg.h"
 #include "build-info.h"
 #include "common.h"
+#include "file-pins.h"
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
@@ -696,7 +697,8 @@ static int server_run_instance(common_params & params, server_role & role, commo
     }
 
     // check the sha256 pins before anything reads the model or adapter files
-    if (!common_verify_file_pins(params)) {
+    // embedded in llama-cli (no pin options there): skip the "not pinned" warnings
+    if (!common_verify_file_pins(params, /* warn_unpinned */ opts.resolve_model)) {
         clean_up();
         ctx_http.join();
         SRV_ERR("%s", "exiting due to sha256 pin check failure\n");

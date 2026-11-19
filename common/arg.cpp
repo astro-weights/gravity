@@ -12,9 +12,9 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "preset.h"
+#include "file-pins.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cinttypes>
 #include <climits>
 #include <cmath>
@@ -317,21 +317,6 @@ static bool parse_bool_value(const std::string & value) {
     } else {
         throw std::invalid_argument("invalid boolean value");
     }
-}
-
-// exactly 64 hex digits, case-insensitive; returns lower case
-static std::string parse_sha256_hex(const std::string & value) {
-    if (value.size() != 64) {
-        throw std::invalid_argument(string_format("invalid sha256 '%s': expected 64 hex digits, got %zu characters", value.c_str(), value.size()));
-    }
-    std::string out = value;
-    for (auto & c : out) {
-        if (!std::isxdigit((unsigned char) c)) {
-            throw std::invalid_argument(string_format("invalid sha256 '%s': not a hex digit: '%c'", value.c_str(), c));
-        }
-        c = (char) std::tolower((unsigned char) c);
-    }
-    return out;
 }
 
 [[noreturn]] static void arg_removed(const std::string & msg) {
@@ -2982,7 +2967,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "the server refuses to start when a file does not match (repeatable, or use comma-separated values)",
         [](common_params & params, const std::string & value) {
             for (const auto & item : parse_csv_row(value)) {
-                params.lora_sha256.push_back(parse_sha256_hex(item));
+                params.lora_sha256.push_back(common_parse_sha256_hex(item));
             }
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -3055,7 +3040,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "sha256 of the model file (64 hex digits); the server refuses to start when the file does not match\n"
         "not supported for split models and in router mode",
         [](common_params & params, const std::string & value) {
-            params.model_sha256 = parse_sha256_hex(value);
+            params.model_sha256 = common_parse_sha256_hex(value);
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODEL_SHA256"));
     add_opt(common_arg(

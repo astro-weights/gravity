@@ -82,6 +82,8 @@ add_library(${TARGET}
     fit.h
     file-lock.cpp
     file-lock.h
+    file-pins.cpp
+    file-pins.h
     hf-cache.cpp
     hf-cache.h
     http.h

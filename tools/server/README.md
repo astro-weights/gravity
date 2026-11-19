@@ -353,6 +353,8 @@ services:
 
 Not covered: a file swapped after the check and before the load (needs local write access to the file), the reload after the sleep state, and other files such as `--mmproj` or a draft model.
 
+Use the pins in single-model mode only. In router mode, pins set in per-model preset sections are not checked before the router's memory-measure step reads the GGUF metadata.
+
 ### Multimodal support
 
 Multimodal support was added in [#12898](https://github.com/ggml-org/llama.cpp/pull/12898) and is currently an experimental feature.

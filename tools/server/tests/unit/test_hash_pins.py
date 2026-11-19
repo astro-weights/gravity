@@ -191,6 +191,14 @@ def test_model_pin_split_model(tmp_path, model_path):
     assert LOAD_MARKER not in out
 
 
+def test_model_pin_extra_shard(model_path):
+    # --shard / --ple add files the loader reads besides the pinned one
+    code, out = run_failing(["--offline", "-m", model_path, "--shard", model_path, "--model-sha256", sha256_of(model_path)])
+    assert code != 0
+    assert "not supported for split models" in out
+    assert LOAD_MARKER not in out
+
+
 def test_pin_router_mode():
     code, out = run_failing(["--offline", "--model-sha256", ZERO_HASH])
     assert code != 0
@@ -249,3 +257,21 @@ def test_unpinned_warns(ready_server, moe_paths):
     log = server.log()
     assert "model not pinned (--model-sha256)" in log
     assert "LoRA adapter not pinned (--lora-sha256)" in log
+
+
+def test_lora_pins_swapped(tmp_path, moe_paths):
+    # two different adapters, one per flag kind; each pin must go to its own file, in command-line order
+    model, lora = moe_paths
+    lora2 = tmp_path / "lora2.gguf"
+    lora2.write_bytes(open(lora, "rb").read() + b"\0")
+    pin1, pin2 = sha256_of(lora), sha256_of(str(lora2))
+    assert pin1 != pin2
+    code, out = run_failing([
+        "--offline", "-m", model,
+        "--lora", lora, "--lora-scaled", f"{lora2}:0.5",
+        "--lora-sha256", pin2, "--lora-sha256", pin1,
+    ])
+    assert code != 0
+    assert "sha256 mismatch for LoRA adapter" in out
+    assert f"'{lora}': expected {pin2}, actual {pin1}" in out
+    assert LOAD_MARKER not in out
