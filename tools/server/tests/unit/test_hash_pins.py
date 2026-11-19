@@ -1,4 +1,5 @@
 import hashlib
+import socket
 import subprocess
 import time
 
@@ -23,9 +24,18 @@ def sha256_of(path: str) -> str:
     return h.hexdigest()
 
 
+def free_port() -> int:
+    # own port per server: another suite on the default port must not answer for this one
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def resolve_model_path(preset: ServerProcess) -> str:
     # the path the server actually loads (-hf resolves into the cache)
+    preset.server_port = free_port()
     preset.start()
+    assert preset.process is not None and preset.process.poll() is None
     res = preset.make_request("GET", "/props")
     assert res.status_code == 200
     path = res.body["model_path"]
@@ -51,9 +61,8 @@ def server_bin() -> str:
 
 def run_failing(args: list[str], timeout: float = 60) -> tuple[int, str]:
     """run llama-server, expect it to exit by itself; returns (exit code, output)"""
-    port = int(os.environ.get("PORT", "8080"))
     env = {**os.environ, "LLAMA_CACHE": os.environ.get("LLAMA_CACHE", "tmp")}
-    cmd = [server_bin(), "--port", str(port), "--host", "127.0.0.1", *args]
+    cmd = [server_bin(), "--port", str(free_port()), "--host", "127.0.0.1", *args]
     print(f"tests: running {' '.join(cmd)}")
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, timeout=timeout)
     out = proc.stdout.decode("utf-8", errors="replace")
@@ -65,7 +74,7 @@ class ReadyServer:
     """llama-server started with the given args and waited for until /health is ok; keeps its output"""
 
     def __init__(self, args: list[str], log_path: str, timeout: float = DEFAULT_HTTP_TIMEOUT):
-        port = int(os.environ.get("PORT", "8080"))
+        port = free_port()
         self.url = f"http://127.0.0.1:{port}"
         self.log_path = log_path
         env = {**os.environ, "LLAMA_CACHE": os.environ.get("LLAMA_CACHE", "tmp")}
@@ -78,7 +87,7 @@ class ReadyServer:
             if self.proc.poll() is not None:
                 raise RuntimeError(f"server exited with {self.proc.returncode}:\n{self.log()}")
             try:
-                if requests.get(self.url + "/health", timeout=1).status_code == 200:
+                if requests.get(self.url + "/health", timeout=1).status_code == 200 and self.proc.poll() is None:
                     return
             except requests.RequestException:
                 pass
