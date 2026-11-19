@@ -375,18 +375,18 @@ The defaults are constants in `tools/server/server-gravity.cpp`. Changing one is
 
 In eval mode every other route that could run the model or load saved KV answers HTTP 400, so no request runs an adapter without the filled defaults and the echo: `POST /lora-adapters` (set scales per request instead), `POST /slots/:id`, `/infill`, `/v1/responses`, `/v1/messages`, `/embedding(s)`, `/v1/embeddings`, `/rerank` and its aliases, `/v1/systemone`, `/v1/audio/transcriptions`, `/tts`, `/v1/audio/speech`. `GET /lora-adapters`, `/props`, `/health`, `/tokenize`, `/detokenize` and `/apply-template` stay open.
 
-Every response of the routes above carries a `gravity` object (the final chunk when streaming), in and out of eval mode:
+In eval mode every response of the routes above carries a `gravity` object (the final chunk when streaming), also when the request filters fields with `response_fields`. Outside eval mode responses are unchanged from upstream; only `GET /props` has the object:
 
 | Field | Meaning |
 |---|---|
-| `eval_mode` | `true` when `--eval-mode` is set |
+| `eval_mode` | `true` when `--eval-mode` is set (`/props` only can show `false`) |
 | `build` | `llama_build_info()` |
 | `devices_available` | the ggml backend devices registered in this build (the `--device` list if given). This is not proof of which device ran the model: a model can run on the CPU while a GPU is listed |
 | `model_sha256` | value of `--model-sha256`, else `null` |
 | `lora` | `[{"id", "scale", "sha256"}]`: scale this request ran with, `--lora-sha256` value or `null` |
 | `seed`, `temperature`, `samplers` | values the request ran with |
-| `filled` | field names filled by default (always `[]` outside eval mode) |
-| `overridden` | field names forced by eval mode (always `[]` outside eval mode) |
+| `filled` | field names filled by default |
+| `overridden` | field names forced by eval mode |
 
 `GET /props` has `gravity` with `eval_mode`, `build`, `devices_available`, `model_sha256` and `lora` (scales at startup; later `POST /lora-adapters` changes are not shown there, see the per-response object).
 

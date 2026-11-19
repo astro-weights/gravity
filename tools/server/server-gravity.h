@@ -18,7 +18,7 @@ struct gravity_fill {
 // only for /completion, /completions, /v1/completions and /v1/chat/completions
 gravity_fill gravity_fill_request(const common_params & params, const json & data, server_task_type type, task_response_type res_type);
 
-// provenance of one request, without "lora" (see gravity_set_lora)
+// provenance of one request, without "lora" (see gravity_set_lora); null outside eval mode, so responses stay upstream's
 json gravity_provenance(const common_params & params, const task_params & tp, const gravity_fill & gf);
 
 // add the "lora" scales the slot ran with
