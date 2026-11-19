@@ -72,10 +72,10 @@ jobs:
       - name: Server tests
         if: steps.server.outputs.run == 'true'
         working-directory: tools/server/tests
-        # Same as tests.sh (fast suite). test_no_ui needs the embedded web UI, which CI builds leave out.
+        # Same as tests.sh (fast suite). Deselected tests need the embedded web UI, which CI builds leave out.
         run: |
           PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install -q -r requirements.txt
-          python3 -m pytest --durations=30 -v -x -n 4 --dist=worksteal -m "not slow" --deselect unit/test_basic.py::test_no_ui
+          python3 -m pytest --durations=30 -v -x -n 4 --dist=worksteal -m "not slow" --deselect unit/test_basic.py::test_no_ui --deselect unit/test_security.py::test_access_static_assets_without_api_key
       - if: steps.server.outputs.run == 'true' && github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
