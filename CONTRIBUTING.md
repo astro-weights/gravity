@@ -1,5 +1,7 @@
 # Contributors
 
+> **gravity:** merge only a PR whose CI is green: `scripts/merge.sh <PR number>`, or the merge button once the merge gate (`.github/workflows/gate.yml`) has marked the PR ready. A draft PR means CI is not green yet; the `hold` label keeps a PR in draft on purpose. The rest of this file is upstream llama.cpp's guide.
+
 The project differentiates between 3 levels of contributors:
 
 - Contributors: people who have contributed before (no special privileges)

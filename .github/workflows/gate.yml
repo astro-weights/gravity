@@ -1,0 +1,78 @@
+name: Merge gate
+
+# GitHub Free has no required checks for private repos; a draft PR is the only thing GitHub will not merge.
+# Every PR goes to draft when opened or updated, and back to ready only when CI passes on its head commit
+# and it has no "hold" label. Merge with scripts/merge.sh. If the token cannot convert a PR to draft, the
+# gate falls back to the "ci-not-green" label and a comment.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_run:  # zizmor: ignore[dangerous-triggers] no checkout or artifacts; reads only run metadata
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  to-draft:
+    if: github.event_name == 'pull_request' && (github.event.action != 'labeled' || github.event.label.name == 'hold') && (github.event.action != 'unlabeled')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr ready "$PR" --undo \
+            || gh pr edit "$PR" --add-label ci-not-green
+
+  # Removing "hold" from a PR whose CI already passed: mark ready without waiting for another CI run.
+  unhold:
+    if: github.event_name == 'pull_request' && github.event.action == 'unlabeled' && github.event.label.name == 'hold'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          ok=$(gh run list --workflow ci.yml --commit "$SHA" --json conclusion --jq '[.[]|select(.conclusion=="success")]|length')
+          if [ "$ok" -gt 0 ]; then gh pr ready "$PR"; gh pr edit "$PR" --remove-label ci-not-green || true; fi
+
+  from-ci:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          PRS: ${{ toJSON(github.event.workflow_run.pull_requests.*.number) }}
+        run: |
+          for pr in $(jq -r '.[]' <<<"$PRS"); do
+            head=$(gh pr view "$pr" --json headRefOid --jq .headRefOid)
+            [ "$head" = "$SHA" ] || continue  # a newer push has its own CI run
+            if [ "$CONCLUSION" = success ]; then
+              if gh pr view "$pr" --json labels --jq '.labels[].name' | grep -qx hold; then continue; fi
+              gh pr edit "$pr" --remove-label ci-not-green || true
+              gh pr ready "$pr" || true  # no-op when the label fallback left it ready
+            else
+              gh pr comment "$pr" --body "CI ended \`$CONCLUSION\` on ${SHA:0:9}: $RUN_URL. This PR stays draft until CI passes."
+            fi
+          done
