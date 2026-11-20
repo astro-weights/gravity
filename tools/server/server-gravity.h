@@ -24,7 +24,7 @@ json gravity_provenance(const common_params & params, const json & devices, cons
 // add the "lora" scales the slot ran with
 void gravity_set_lora(json & gravity, const common_params & params, const std::vector<common_adapter_lora_info> & lora);
 
-// where the loaded model runs: {"devices_used", "layers_on_device"}, from llama_model_layer_device()
+// where the loaded model runs: {"devices_used", "device_info", "layers_on_device", "output_device"}, from llama_model_layer_device()
 json gravity_devices_used(const llama_model * model);
 
 // static part for GET /props; devices = gravity_devices_used() of the loaded model

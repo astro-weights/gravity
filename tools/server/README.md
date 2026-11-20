@@ -383,6 +383,7 @@ In eval mode every response of the routes above carries a `gravity` object (the 
 | `build` | `llama_build_info()` |
 | `devices_available` | the ggml backend devices registered in this build (the `--device` list if given). This is not proof of which device ran the model: a model can run on the CPU while a GPU is listed |
 | `devices_used` | device names the loaded model's layers (and output layer) are placed on, each once, in layer order. Comes from the loaded model (`llama_model_layer_device()`), so it shows where the model runs, unlike `devices_available` |
+| `device_info` | `[{"name", "description", "memory_total_mib"}]`, one per `devices_used` entry, in the same order, computed at startup. `description` is `ggml_backend_dev_description()` (e.g. `NVIDIA GeForce RTX 3070 Ti`), so it shows which card ran. `memory_total_mib` is `ggml_backend_dev_memory()` total in MiB: GPU memory for a GPU device, host RAM as ggml reports it for `CPU` (`0` if the backend does not report it) |
 | `layers_on_device` | `{"<device>": n_layers}`: repeating layers per device, sums to the model's layer count |
 | `output_device` | device of the output layer |
 | `model_sha256` | value of `--model-sha256`, else `null` |
@@ -391,7 +392,7 @@ In eval mode every response of the routes above carries a `gravity` object (the 
 | `filled` | field names filled by default |
 | `overridden` | field names forced by eval mode |
 
-`GET /props` has `gravity` with `eval_mode`, `build`, `devices_available`, `devices_used`, `layers_on_device`, `output_device`, `model_sha256` and `lora` (scales at startup; later `POST /lora-adapters` changes are not shown there, see the per-response object).
+`GET /props` has `gravity` with `eval_mode`, `build`, `devices_available`, `devices_used`, `device_info`, `layers_on_device`, `output_device`, `model_sha256` and `lora` (scales at startup; later `POST /lora-adapters` changes are not shown there, see the per-response object).
 
 ### Multimodal support
 
