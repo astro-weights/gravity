@@ -5294,6 +5294,7 @@ server_context_meta server_context::get_meta() const {
         /* model_n_params          */ llama_model_n_params(impl->model_tgt),
         /* model_size              */ llama_model_size(impl->model_tgt),
         /* model_ftype             */ ftype_name,
+        /* gravity_devices         */ gravity_devices_used(impl->model_tgt),
     };
 }
 
@@ -5401,7 +5402,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     params,
                     meta->logit_bias_eog,
                     data);
-            task.params.gravity = gravity_provenance(params, task.params, gf);
+            task.params.gravity = gravity_provenance(params, meta->gravity_devices, task.params, gf);
 
             task.apply_chat_session(chat_session);
 
@@ -5712,7 +5713,7 @@ static json get_res_props(const server_context_meta & meta, const common_params 
     json props = {
         { "default_generation_settings", default_generation_settings_for_props },
         { "total_slots",                 params.n_parallel },
-        { "gravity",                     gravity_props(params) },
+        { "gravity",                     gravity_props(params, meta.gravity_devices) },
         { "model_alias",                 meta.model_name },
         { "model_ftype",                 meta.model_ftype },
         { "model_path",                  meta.model_path },

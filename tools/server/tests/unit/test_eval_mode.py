@@ -148,6 +148,39 @@ def test_model_sha256_echo(start):
     assert post(s2, "/completion", BASE).json()["gravity"]["model_sha256"] is None
 
 
+def check_devices(g: dict, n_layer: int):
+    assert sum(g["layers_on_device"].values()) == n_layer
+    assert set(g["layers_on_device"]) <= set(g["devices_used"])
+    assert g["output_device"] in g["devices_used"]
+    assert g["devices_used"][0] in g["layers_on_device"]
+
+
+def test_devices_used_cpu(start):
+    s = start("--eval-mode", "-ngl", "0")
+    n_layer = 6  # stories15M_MOE
+    for g in (post(s, "/completion", BASE).json()["gravity"], s.get("/props").json()["gravity"]):
+        assert g["devices_used"] == ["CPU"]
+        assert g["layers_on_device"] == {"CPU": n_layer}
+        check_devices(g, n_layer)
+
+
+def test_devices_used_gpu(start):
+    s = start("--eval-mode", "-ngl", "99")
+    props = s.get("/props").json()["gravity"]
+    gpu = [d for d in props["devices_available"] if d != "CPU"]
+    if not gpu:
+        pytest.skip("no GPU device registered")
+    for g in (post(s, "/completion", BASE).json()["gravity"], props):
+        assert set(g["devices_used"]) & set(gpu)
+        check_devices(g, sum(g["layers_on_device"].values()))
+
+
+def test_devices_used_props_without_eval_mode(start):
+    s = start("-ngl", "0")
+    assert s.get("/props").json()["gravity"]["devices_used"] == ["CPU"]
+    assert "gravity" not in post(s, "/completion", BASE).json()
+
+
 REFUSED = [
     "/lora-adapters", "/slots/0?action=restore", "/infill", "/v1/responses", "/v1/messages",
     "/embedding", "/v1/embeddings", "/rerank", "/v1/systemone", "/v1/audio/transcriptions", "/tts", "/v1/audio/speech",

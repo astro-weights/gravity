@@ -3606,6 +3606,14 @@ int32_t llama_model_n_layer_nextn(const llama_model * model) {
     return model->hparams.n_layer_nextn;
 }
 
+const char * llama_model_layer_device(const llama_model * model, int32_t il) {
+    if (il < -1 || il >= llama_model_n_layer(model)) {
+        return nullptr;
+    }
+    ggml_backend_dev_t dev = il < 0 ? model->dev_output() : model->dev_layer(il);
+    return dev ? ggml_backend_dev_name(dev) : nullptr;
+}
+
 int32_t llama_model_dflash_selector_top_k(const llama_model * model) {
     return model->hparams.dflash_selector_top_k;
 }

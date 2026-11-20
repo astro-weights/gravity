@@ -19,13 +19,16 @@ struct gravity_fill {
 gravity_fill gravity_fill_request(const common_params & params, const json & data, server_task_type type, task_response_type res_type);
 
 // provenance of one request, without "lora" (see gravity_set_lora); null outside eval mode, so responses stay upstream's
-json gravity_provenance(const common_params & params, const task_params & tp, const gravity_fill & gf);
+json gravity_provenance(const common_params & params, const json & devices, const task_params & tp, const gravity_fill & gf);
 
 // add the "lora" scales the slot ran with
 void gravity_set_lora(json & gravity, const common_params & params, const std::vector<common_adapter_lora_info> & lora);
 
-// static part for GET /props
-json gravity_props(const common_params & params);
+// where the loaded model runs: {"devices_used", "layers_on_device"}, from llama_model_layer_device()
+json gravity_devices_used(const llama_model * model);
+
+// static part for GET /props; devices = gravity_devices_used() of the loaded model
+json gravity_props(const common_params & params, const json & devices);
 
 // eval mode: answer 400 on every route that could run the model (or load KV) without filled defaults and the echo:
 // POST /lora-adapters, POST /slots/:id, /infill, /v1/responses, /v1/messages, embeddings, rerank, /v1/systemone, audio

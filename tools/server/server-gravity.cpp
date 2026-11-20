@@ -95,6 +95,28 @@ static json devices_available(const common_params & params) {
     return names;
 }
 
+// "devices_used": each device name once, layers in order then the output layer; "layers_on_device": layer count per name (output layer not counted)
+json gravity_devices_used(const llama_model * model) {
+    json used = json::array();
+    json layers = json::object();
+    for (int32_t il = 0; il < llama_model_n_layer(model); il++) {
+        const char * name = llama_model_layer_device(model, il);
+        if (!name) {
+            continue;
+        }
+        if (!layers.contains(name)) {
+            used.push_back(name);
+            layers[name] = 0;
+        }
+        layers[name] = layers[name].get<int>() + 1;
+    }
+    const char * out = llama_model_layer_device(model, -1);
+    if (out && !layers.contains(out)) {
+        used.push_back(out);
+    }
+    return { {"devices_used", used}, {"layers_on_device", layers}, {"output_device", out ? json(out) : json(nullptr)} };
+}
+
 static json lora_json(const common_params & params, size_t i, float scale) {
     return {
         {"id",     i},
@@ -103,26 +125,30 @@ static json lora_json(const common_params & params, size_t i, float scale) {
     };
 }
 
-json gravity_props(const common_params & params) {
+json gravity_props(const common_params & params, const json & devices) {
     json lora = json::array();
     for (size_t i = 0; i < params.lora_adapters.size(); i++) {
         lora.push_back(lora_json(params, i, params.lora_adapters[i].scale));
     }
-    return {
+    json g = {
         {"eval_mode",    params.eval_mode},
         {"build",        std::string(llama_build_info())},
         {"devices_available", devices_available(params)},
         {"model_sha256", pin_or_null(params.model_sha256)},
         {"lora",         lora},
     };
+    for (auto it = devices.begin(); it != devices.end(); ++it) {
+        g[it.key()] = it.value();
+    }
+    return g;
 }
 
-json gravity_provenance(const common_params & params, const task_params & tp, const gravity_fill & gf) {
+json gravity_provenance(const common_params & params, const json & devices, const task_params & tp, const gravity_fill & gf) {
     // outside eval mode responses stay exactly upstream's (clients may filter with response_fields); /props still has the object
     if (!params.eval_mode) {
         return json();
     }
-    json g = gravity_props(params);
+    json g = gravity_props(params, devices);
     g.erase("lora");
     json samplers = json::array();
     for (auto s : tp.sampling.samplers) {
