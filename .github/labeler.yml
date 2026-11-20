@@ -1,0 +1,77 @@
+# Auto-labels PRs by changed paths (actions/labeler). Adapted from upstream llama.cpp's .github/labeler.yml (v1.0.0):
+# kept the backends gravity builds (CPU, CUDA, Metal) and the general areas; upstream's server/ggml/devops map to gravity's area labels.
+Apple Metal:
+- changed-files:
+  - any-glob-to-any-file:
+    - ggml/include/ggml-metal.h
+    - ggml/src/ggml-metal/**
+    - README-metal.md
+CUDA:
+- changed-files:
+  - any-glob-to-any-file:
+    - ggml/include/ggml-cuda.h
+    - ggml/src/ggml-cuda/**
+documentation:
+- changed-files:
+  - any-glob-to-any-file:
+    - '**/*.md'
+    - docs/**
+    - media/**
+examples:
+- all:
+  - changed-files:
+    - any-glob-to-any-file:
+      - app/**
+      - examples/**
+      - tools/**
+    - all-globs-to-all-files:
+      - '!tools/server/**'
+      - '!tools/mtmd/**'
+      - '!tools/ui/**'
+testing:
+- changed-files:
+  - any-glob-to-any-file:
+    - tests/**
+build:
+- changed-files:
+  - any-glob-to-any-file:
+    - cmake/**
+    - CMakeLists.txt
+    - CMakePresets.json
+'area: ci':
+- changed-files:
+  - any-glob-to-any-file:
+    - .devops/**
+    - .github/**
+    - ci/**
+'area: server':
+- changed-files:
+  - any-glob-to-any-file:
+    - tools/ui/**
+- changed-files:
+  - any-glob-to-any-file:
+    - tools/server/**
+conversion:
+- changed-files:
+  - any-glob-to-any-file:
+    - conversion/**
+    - convert_*.py
+    - gguf-py/**
+vendor:
+- changed-files:
+  - any-glob-to-any-file:
+    - vendor/**
+'area: ggml':
+- changed-files:
+  - any-glob-to-any-file:
+    - ggml/**
+model:
+- changed-files:
+  - any-glob-to-any-file:
+    - src/models/**
+'area: lora':
+- changed-files:
+  - any-glob-to-any-file:
+    - src/llama-adapter.*
+    - tools/server/**/*lora*
+    - common/*lora*
