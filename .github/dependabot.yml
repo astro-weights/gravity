@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Workflow action pins only. One grouped PR a week keeps CI minutes low (private repo, GitHub Free).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

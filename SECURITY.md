@@ -1,5 +1,7 @@
 # Security Policy
 
+> **gravity:** report a vulnerability in gravity to the astro-weights maintainers, not to llama.cpp: open an issue in this private repository with the `security` label, or tell a maintainer directly. If the flaw is also in upstream llama.cpp at the base tag (UPSTREAM.md), say so; upstream disclosure is then the maintainers' call. The rest of this file is upstream llama.cpp's policy; its guidance on untrusted models, inputs and networks applies to gravity too.
+
  - [**Reporting a vulnerability**](#reporting-a-vulnerability)
  - [**Requirements**](#requirements)
  - [**Covered Topics**](#covered-topics)
