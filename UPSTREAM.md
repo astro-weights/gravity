@@ -14,6 +14,7 @@ gravity is built on [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT, Cop
 
 - `.github/workflows/` removed. Upstream's workflows target upstream's runners, release channels and self-hosted machines, and would spend this repository's Actions minutes. gravity's own workflows replace them.
 - `UPSTREAM.md` added.
+- Later (2026-11-20): upstream's `.github/actions/` removed (used only by its workflows). Kept and adapted: the three bug templates (upstream links and AI-output rule removed, backends trimmed, upstream-check field added) and `.github/labeler.yml` (gravity's backends and area labels, run by `labeler.yml` workflow). Replaced: research/refactor/enhancement templates and the PR template (they pointed at upstream's discussions and guidelines). `SECURITY.md` gained a gravity reporting note at the top.
 
 Nothing else differs from the upstream tag. `LICENSE`, `AUTHORS`, `licenses/` and the licence files under `vendor/` and `gguf-py/` are kept unchanged, and must stay so in every file that comes from upstream.
 

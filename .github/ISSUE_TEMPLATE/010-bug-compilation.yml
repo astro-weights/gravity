@@ -1,19 +1,18 @@
 name: Bug (compilation)
-description: Something goes wrong when trying to compile llama.cpp.
+description: Something goes wrong when trying to compile gravity.
 title: "Compile bug: "
-labels: ["bug-unconfirmed", "compilation"]
+labels: ["bug", "needs triage"]
 body:
   - type: markdown
     attributes:
       value: >
         Thanks for taking the time to fill out this bug report!
-        This issue template is intended for bug reports where the compilation of llama.cpp fails.
+        This issue template is intended for bug reports where the compilation of gravity fails.
         Before opening an issue, please confirm that the compilation still fails
         after recreating the CMake build directory and with `-DGGML_CCACHE=OFF`.
         If the compilation succeeds with ccache disabled you should be able to permanently fix the issue
         by clearing `~/.cache/ccache` (on Linux).
 
-        Please fill out this template yourself, copypasting language model outputs is [strictly prohibited](https://github.com/ggml-org/llama.cpp/blob/master/CONTRIBUTING.md#ai-usage-policy).
   - type: textarea
     id: commit
     attributes:
@@ -43,7 +42,7 @@ body:
     attributes:
         label: GGML backends
         description: Which GGML backends do you know to be affected?
-        options: [AMX, BLAS, CANN, CPU, CUDA, Hexagon, HIP, Metal, Musa, OpenCL, OpenVINO, RPC, SYCL, VirtGPU, Vulkan, WebGPU, zDNN, ZenDNN]
+        options: [CPU, CUDA, Metal, BLAS, RPC, Vulkan, Other]
         multiple: true
     validations:
       required: true
@@ -55,7 +54,7 @@ body:
         Please give us a summary of the problem and tell us how to reproduce it.
         If you can narrow down the bug to specific compile flags, that information would be very much appreciated by us.
       placeholder: >
-        I'm trying to compile llama.cpp with CUDA support on a fresh install of Ubuntu and get error XY.
+        I'm trying to compile gravity with CUDA support on a fresh install of Ubuntu and get error XY.
         Here are the exact commands that I used: ...
     validations:
       required: true
@@ -73,7 +72,7 @@ body:
     attributes:
       label: Compile command
       description: >
-        Please provide the exact command you used to compile llama.cpp. For example: `cmake -B ...`.
+        Please provide the exact command you used to compile gravity. For example: `cmake -B ...`.
         This will be automatically formatted into code, so no need for backticks.
       render: shell
     validations:
@@ -86,5 +85,15 @@ body:
           Please copy and paste any relevant log output, including any generated text.
           This will be automatically formatted into code, so no need for backticks.
       render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: upstream
+    attributes:
+      label: Also on upstream llama.cpp at the base tag (UPSTREAM.md)?
+      options:
+        - Not checked
+        - "Yes"
+        - "No"
     validations:
       required: true

@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest a new capability for gravity.
+type: Feature
+labels: [enhancement, needs triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that gravity does not support?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you would like to see, for example the request fields or flags you have in mind.
+  - type: dropdown
+    id: upstream
+    attributes:
+      label: Could this go to upstream llama.cpp instead?
+      description: Changes that fit upstream keep gravity's diff small (see UPSTREAM.md).
+      options:
+        - Not sure
+        - "Yes"
+        - No, it is gravity-specific

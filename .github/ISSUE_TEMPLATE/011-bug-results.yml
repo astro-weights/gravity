@@ -1,19 +1,18 @@
 name: Bug (model use)
 description: Something goes wrong when running a model (crashes, garbled outputs, etc.).
 title: "Eval bug: "
-labels: ["bug-unconfirmed", "model evaluation"]
+labels: ["bug", "needs triage"]
 body:
   - type: markdown
     attributes:
       value: >
         Thanks for taking the time to fill out this bug report!
         This issue template is intended for bug reports where the model evaluation results
-        (i.e. the generated text) are incorrect or llama.cpp crashes during model evaluation.
+        (i.e. the generated text) are incorrect or gravity crashes during model evaluation.
         If you encountered the issue while using an external UI (e.g. ollama),
         please reproduce your issue using one of the examples/binaries in this repository.
         The `llama-completion` binary can be used for simple and reproducible model inference.
 
-        Please fill out this template yourself, copypasting language model outputs is [strictly prohibited](https://github.com/ggml-org/llama.cpp/blob/master/CONTRIBUTING.md#ai-usage-policy).
   - type: textarea
     id: version
     attributes:
@@ -44,7 +43,7 @@ body:
     attributes:
         label: GGML backends
         description: Which GGML backends do you know to be affected?
-        options: [AMX, BLAS, CANN, CPU, CUDA, Hexagon, HIP, Metal, Musa, OpenCL, OpenVINO, RPC, SYCL, VirtGPU, Vulkan, WebGPU, zDNN, ZenDNN]
+        options: [CPU, CUDA, Metal, BLAS, RPC, Vulkan, Other]
         multiple: true
     validations:
       required: true
@@ -113,5 +112,15 @@ body:
         </details>
 
         <!-- Long logs that you upload as files go here, outside the "console" area -->
+    validations:
+      required: true
+  - type: dropdown
+    id: upstream
+    attributes:
+      label: Also on upstream llama.cpp at the base tag (UPSTREAM.md)?
+      options:
+        - Not checked
+        - "Yes"
+        - "No"
     validations:
       required: true
