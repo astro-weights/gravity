@@ -57,6 +57,7 @@ struct server_context_meta {
     uint64_t model_n_params;
     uint64_t model_size;
     std::string model_ftype;
+    json gravity_devices; // see gravity_devices_used()
 };
 
 using server_state_callback_t = std::function<void(server_state, json /* payload */)>;
