@@ -95,7 +95,7 @@ static json devices_available(const common_params & params) {
     return names;
 }
 
-// "devices_used": each device name once, layers in order then the output layer; "layers_on_device": layer count per name (output layer not counted)
+// "devices_used": each device name once, layers in order then the output layer; "device_info": ggml description and total memory per used device; "layers_on_device": layer count per name (output layer not counted)
 json gravity_devices_used(const llama_model * model) {
     json used = json::array();
     json layers = json::object();
@@ -114,7 +114,20 @@ json gravity_devices_used(const llama_model * model) {
     if (out && !layers.contains(out)) {
         used.push_back(out);
     }
-    return { {"devices_used", used}, {"layers_on_device", layers}, {"output_device", out ? json(out) : json(nullptr)} };
+    json info = json::array();
+    for (const auto & name : used) {
+        ggml_backend_dev_t dev = ggml_backend_dev_by_name(name.get<std::string>().c_str());
+        size_t mem_free = 0, mem_total = 0;
+        if (dev) {
+            ggml_backend_dev_memory(dev, &mem_free, &mem_total);
+        }
+        info.push_back({
+            {"name",             name},
+            {"description",      dev ? json(ggml_backend_dev_description(dev)) : json(nullptr)},
+            {"memory_total_mib", mem_total / (1024 * 1024)},
+        });
+    }
+    return { {"devices_used", used}, {"device_info", info}, {"layers_on_device", layers}, {"output_device", out ? json(out) : json(nullptr)} };
 }
 
 static json lora_json(const common_params & params, size_t i, float scale) {

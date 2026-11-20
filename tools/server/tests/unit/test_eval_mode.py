@@ -153,6 +153,10 @@ def check_devices(g: dict, n_layer: int):
     assert set(g["layers_on_device"]) <= set(g["devices_used"])
     assert g["output_device"] in g["devices_used"]
     assert g["devices_used"][0] in g["layers_on_device"]
+    assert [d["name"] for d in g["device_info"]] == g["devices_used"]
+    for d in g["device_info"]:
+        assert d["description"]
+        assert d["memory_total_mib"] > 0
 
 
 def test_devices_used_cpu(start):
