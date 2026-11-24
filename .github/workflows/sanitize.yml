@@ -1,0 +1,54 @@
+name: Sanitizers
+
+# ASan + UBSan and TSan on gravity's own code (src/gravity, the threaded read pool and scheduler).
+# Builds only the four test-gravity-* targets (they link gravity-stream, not libllama): about 2 min
+# per leg. Path-filtered so upstream-only PRs spend nothing.
+on:
+  pull_request:
+    paths:
+      - "src/gravity/**"
+      - "tests/test-gravity-*"
+      - "tests/CMakeLists.txt"
+      - ".github/workflows/sanitize.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanitize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: address-undefined
+            flags: -DLLAMA_SANITIZE_ADDRESS=ON -DLLAMA_SANITIZE_UNDEFINED=ON
+          - name: thread
+            flags: -DLLAMA_SANITIZE_THREAD=ON
+    name: sanitize (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # TSan aborts on Ubuntu 24.04's default 32-bit mmap randomness.
+      - name: Lower ASLR entropy for TSan
+        if: matrix.name == 'thread'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Build gravity tests
+        env:
+          FLAGS: ${{ matrix.flags }}
+        run: |
+          # shellcheck disable=SC2086
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DGGML_NATIVE=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_SERVER=OFF $FLAGS
+          cmake --build build -j "$(nproc)" --target test-gravity-mem-budget test-gravity-io test-gravity-swap test-gravity-scheduler
+      - name: Run
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: cd build && ctest -R '^test-gravity-' --output-on-failure --timeout 300
