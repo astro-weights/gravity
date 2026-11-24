@@ -1,131 +1,155 @@
-# llama.cpp
+# gravity
 
-![llama.cpp](https://raw.githubusercontent.com/ggml-org/llama-brand/refs/heads/master/logo/svg/cover/llama-cpp/cover-llama-cpp-dark.svg)
+**Run an open model with an adapter, and know which adapter, at what strength, on every answer.**
 
-<div align="center">
+gravity is our fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) for running the LoRA adapters that [astro-weights](https://github.com/astro-weights/astro-weights) makes. An adapter is a small course correction to a model, and when you measure one you need to know it was actually on, or actually off, for every request. Stock llama.cpp makes that easy to get wrong.
 
-<b>LLM inference in C/C++</b>
+Two things we hit on stock llama.cpp (build b12359, Qwen3.5-9B Q4_K_M, Apple M3 Pro):
+- A request without a `lora` field ran the adapter at full strength, even on a fresh server started with `--lora-init-without-apply` (5 of 5 test prompts).
+- With 4 parallel slots, only 3 of 20 answers matched the single-slot run byte for byte. With 1 slot, 20 of 20 matched.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp?filter=v*&color=brightgreen)](https://github.com/ggml-org/llama.cpp/releases?q=tag:v1)
-[![Nightly](https://img.shields.io/github/v/release/ggml-org/llama.cpp?label=nightly&filter=b*&color=orange)](https://github.com/ggml-org/llama.cpp/releases?q=b)
-[![Server](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/server.yml?label=Server)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
-[![Docker](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/docker.yml?label=Docker)](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml)
-[![Winget](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/winget.yml?label=Winget)](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml)
+## What gravity adds
+- **Pinned files.** `--model-sha256` and `--lora-sha256` check the base model and each adapter before loading. A wrong file stops the server and names both hashes.
+- **Eval mode.** `--eval-mode` turns on one slot and no prompt cache, starts every adapter at strength 0, and fills any missing sampling field with a fixed default. On our test model the base arm reran byte-identical, 20 of 20 answers, on a Mac (Metal) and on Linux (CUDA).
+- **Strict `lora` lists.** Bad `lora` entries get HTTP 400 instead of being ignored.
+- **A receipt on every answer in eval mode.** Each answer reports the strength and sha256 of every adapter, the model's sha256, which fields gravity filled or overrode, and the device that ran it.
 
-[ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md) / [maintainer PRs](https://github.com/ggml-org/llama.cpp/pulls?q=is%3Apr%20is%3Aopen%20draft%3AFalse%20(author%3Asanmai%20OR%20author%3Argerganov%20OR%20author%3AKitaitiMakoto%20OR%20author%3Adanbev%20OR%20author%3Aaldehir%20OR%20author%3Amax-krasnyansky%20OR%20author%3ACISC%20OR%20author%3Aggerganov%20OR%20author%3Aam17an%20OR%20author%3Ajhen0409%20OR%20author%3Abartowski1182%20OR%20author%3Anikwen%20OR%20author%3Ahipudding%20OR%20author%3Aravi9%20OR%20author%3AServeurpersoCom%20OR%20author%3Athelittlefireman%20OR%20author%3Apwilkin%20OR%20author%3Areeselevine%20OR%20author%3Angxson%20OR%20author%3Ajeffbolznv%20OR%20author%3Amarty1885%20OR%20author%3A0cc4m%20OR%20author%3ATitaniumtown%20OR%20author%3Aangt%20OR%20author%3AIMbackK%20OR%20author%3Aarthw%20OR%20author%3AJohannesGaessler%20OR%20author%3AORippler%20OR%20author%3Aruixiang63%20OR%20author%3Axctan%20OR%20author%3AmasterFoad%20OR%20author%3Aallozaur%20OR%20author%3AAndreas-Krebbel%20OR%20author%3Ayomaytk%20OR%20author%3Aaendk%20OR%20author%3Awine99%20OR%20author%3Agaugarg-nv%20OR%20author%3Ataronaeo%20OR%20author%3Aforforever73%20OR%20author%3Achaxu01%20OR%20author%3Alhez%20OR%20author%3AAlekseiNikiforovIBM%20OR%20author%3Anetrunnereve%20OR%20author%3Afairydreaming%20OR%20author%3Aynankani)%20sort%3Aupdated-desc) / [dev stats](https://github.com/ggml-org/llama.cpp-dev) / [lib llama API](https://github.com/ggml-org/llama.cpp/issues/9289) / [llama-server REST API](https://github.com/ggml-org/llama.cpp/issues/9291)
+## Not built yet
+These are on the roadmap, not in the code:
+- Running models larger than memory by streaming MoE experts from disk (Linux first, then macOS).
+- LoRA adapters on streamed experts.
+- One-command install and Windows builds.
+- A public page of measurements.
 
-</div>
+## What gravity is not
+- **Not a speed race.** We don't compete on tokens per second. If an adapter result can't be checked, it doesn't count.
+- **No telemetry.** gravity sends nothing anywhere by default.
+- **Adapters first.** Features that make adapters safer to run and easier to measure come before everything else.
 
-## Quick start
+gravity follows upstream llama.cpp releases (currently v1.0.0) and keeps its MIT licence.
 
-A few options to get `llama.cpp` installed on your machine:
+[![CI](https://github.com/astro-weights/gravity/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/astro-weights/gravity/actions/workflows/ci.yml?query=branch%3Amain)
+[![CUDA build](https://github.com/astro-weights/gravity/actions/workflows/cuda.yml/badge.svg?event=schedule)](https://github.com/astro-weights/gravity/actions/workflows/cuda.yml)
+[![macOS release build](https://github.com/astro-weights/gravity/actions/workflows/macos.yml/badge.svg)](https://github.com/astro-weights/gravity/actions/workflows/macos.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Based on llama.cpp v1.0.0, see [UPSTREAM.md](UPSTREAM.md). Upstream README: [README.upstream.md](README.upstream.md).
+
+## Details: what gravity adds over llama.cpp v1.0.0
+
+Everything below is built and tested. Full server docs: [tools/server/README.md](tools/server/README.md).
+
+- **File hash pins** (`--model-sha256`, `--lora-sha256`). The server hashes the files at startup. On a mismatch it prints `sha256 mismatch for ...: expected X, actual Y` and exits before it loads anything. Why: a result is only tied to an adapter if the file is the one you think it is. Not for split models and not in router mode. Without pins the server warns `not pinned` and starts as before.
+- **Strict per-request `lora`.** Malformed lists return HTTP 400 (not an array, entry not an object, missing or non-integer `id`, `id` outside the loaded adapters, missing or non-numeric `scale`, unknown key, duplicate `id`). The same check runs on `POST /lora-adapters`. Why: upstream silently ignores a bad entry, so an adapter you thought was on could be off.
+- **Eval mode** (`--eval-mode`). One slot, no prompt cache, no continuous batching, every global adapter scale starts at 0. On `/completion`, `/completions`, `/v1/completions` and `/v1/chat/completions`, each absent field is filled with a fixed default (`seed` 0, `temperature` 0, `samplers` `["top_k","temperature"]`, `top_k` 1, `lora` = every adapter at scale 0) and its name is listed in the response. `cache_prompt: true` is forced to `false`. Routes that could run the model without these defaults (for example `POST /lora-adapters`, `/infill`, `/v1/messages`, embeddings) return HTTP 400. Why: both arms of a comparison run under the same fixed settings, and the arm is always explicit.
+- **`gravity` provenance object.** In eval mode every response from the four routes above carries `gravity` (in the final chunk when streaming). Fields: `eval_mode`, `build`, `devices_available`, `devices_used`, `device_info`, `layers_on_device`, `output_device`, `model_sha256`, `lora` (`id`, `scale`, `sha256` per adapter), `seed`, `temperature`, `samplers`, `filled`, `overridden`. Outside eval mode responses stay exactly as upstream; `GET /props` always has the object. Why: the answer itself says which files, which strengths and which settings made it.
+- **Device info.** `devices_used` (device names the model's layers run on), `layers_on_device` (layer count per device), `output_device`, and `device_info` (ggml description and total memory in MiB per used device, so you can tell which card ran). Why: `devices_available` alone does not show where the model ran.
+- **Slot cache clear on global lora change.** A request without `lora` after one with `lora` no longer reuses a prompt cache computed under the other adapter setting. This is upstream's fix (llama.cpp #30367, commit 58a4a6b49), cherry-picked onto v1.0.0.
+- **`--lora-init-without-apply` scale fix.** On v1.0.0 the flag left every adapter scale at 1.0. In gravity the global scales really start at 0, so a request without `lora` runs the base model.
+
+## Flags and fields
+
+Only what gravity adds. Everything else is upstream's.
+
+| Flag | Default | What |
+|---|---|---|
+| `--model-sha256 HEX` | off | sha256 of the model file (64 hex digits). Server refuses to start on a mismatch. Env `LLAMA_ARG_MODEL_SHA256`. |
+| `--lora-sha256 HEX` | off | sha256 of one LoRA file. Give once per `--lora` / `--lora-scaled`, same order. Repeatable or comma-separated. |
+| `--eval-mode` | off | Reproducible evaluation, see above. Env `LLAMA_ARG_EVAL_MODE`. |
+| `--lora-init-without-apply` | off | Load adapters with every global scale at 0. Eval mode turns it on. |
+
+| Response field | Where | What |
+|---|---|---|
+| `gravity` | eval-mode responses, `GET /props` | Provenance object, fields listed above. |
+| `gravity.filled` | eval-mode responses | Request fields gravity filled with a default. |
+| `gravity.overridden` | eval-mode responses | Request fields gravity forced (`cache_prompt`). |
+| `gravity.devices_used`, `device_info`, `layers_on_device`, `output_device` | eval-mode responses, `GET /props` | Where the model runs. |
+
+## Build
+
+Linux and macOS, from source. Same commands as gravity's CI.
 
 ```bash
-# curl
-curl -LsSf https://llama.app/install.sh | sh
-
-# powershell
-irm https://llama.app/install.ps1 | iex
+git clone https://github.com/astro-weights/gravity
+cd gravity
 ```
 
-- Visit https://llama.app and follow the instructions
-- Run with Docker - see our [Docker documentation](docs/docker.md)
-- Download pre-built binaries from the [releases page](https://github.com/ggml-org/llama.cpp/releases)
-- Build from source by cloning this repository - check out [our build guide](docs/build.md)
+Linux (CPU):
 
-Once installed:
-
-```sh
-# Download and run a model directly from Hugging Face
-llama cli -hf ggml-org/Qwen3.5-0.8B-GGUF
-
-# Launch OpenAI-compatible API server
-llama serve -hf ggml-org/Qwen3.5-0.8B-GGUF
+```bash
+cmake -B build -DGGML_NATIVE=OFF -DLLAMA_USE_PREBUILT_UI=OFF
+cmake --build build --config Release -j "$(nproc)"
 ```
 
-<table align="center">
-    <tr>
-        <td align="center" width=50%>
-            <img width="1310" height="888" alt="VLM session with `llama cli`" src="https://github.com/user-attachments/assets/88726b48-1713-48aa-a525-95a02e78afc4" />
-            <i>VLM session with <b>llama cli</b></i>
-        </td>
-        <td align="center">
-            <img width="1392" height="958" alt="Built-in web UI against `llama serve` running Qwen 3.6" src="https://github.com/user-attachments/assets/b402f972-2e32-4def-8771-8d849f08cf2e" />
-            <i>Built-in web UI against <b>llama serve</b></i>
-        </td>
-    </tr>
-<table>
+macOS (Apple silicon, Metal is on by default; the flag below is what CI sets):
 
-## Description
+```bash
+cmake -B build -DGGML_NATIVE=OFF -DGGML_METAL=ON -DLLAMA_USE_PREBUILT_UI=OFF
+cmake --build build --config Release -j "$(sysctl -n hw.ncpu)"
+```
 
-The main goal of `llama.cpp` is to enable LLM (and VLM) inference with minimal setup and state-of-the-art performance on
-a wide range of hardware - locally and in the cloud.
+The binaries are `build/bin/llama-server` and `build/bin/llama-cli`. For CUDA, Vulkan, HIP and other backends, see [docs/build.md](docs/build.md). `-DLLAMA_USE_PREBUILT_UI=OFF` skips the web UI download, so the server has no web UI.
 
-- Plain C/C++ implementation without any dependencies
-- Apple silicon is a first-class citizen - optimized via ARM NEON, Accelerate and Metal frameworks
-- AVX, AVX2, AVX512 and AMX support for x86 architectures
-- RVV, ZVFH, ZFH, ZICBOP and ZIHINTPAUSE support for RISC-V architectures
-- 1.5-bit, 2-bit, 3-bit, 4-bit, 5-bit, 6-bit, and 8-bit integer quantization for faster inference and reduced memory use
-- Custom CUDA kernels for running LLMs on NVIDIA GPUs (support for AMD GPUs via HIP and Moore Threads GPUs via MUSA)
-- Vulkan and SYCL backend support
-- CPU+GPU hybrid inference to partially accelerate models larger than the total VRAM capacity
+## Evaluate an adapter with astro-weights
 
-The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-org/ggml) library.
+Serve the base GGUF and the adapter GGUF on one server. Pin both files. Eval mode forces one slot (`-np 1`), which is what gives byte-identical reruns.
 
-## Supported backends
+```bash
+astro-weights export ADAPTER_DIR --gguf adapter.gguf --arch qwen35   # prints the adapter sha256
+shasum -a 256 base.gguf                                              # base sha256
+build/bin/llama-server -m base.gguf --lora adapter.gguf \
+  --model-sha256 BASE_SHA256 --lora-sha256 ADAPTER_SHA256 \
+  --eval-mode -np 1 -ngl 99 --port 8080
+```
 
-| Backend | Target devices |
-| --- | --- |
-| [BLAS](docs/build.md#blas-build) | All |
-| [BLIS](docs/backend/BLIS.md) | All |
-| [CANN](docs/build.md#cann) | Huawei Ascend NPU |
-| [CUDA](docs/build.md#cuda) | Nvidia GPU |
-| [HIP](docs/build.md#hip) | AMD GPU |
-| [Hexagon](docs/backend/snapdragon/README.md) | Snapdragon |
-| [IBM zDNN](docs/backend/zDNN.md) | IBM Z & LinuxONE |
-| [MUSA](docs/build.md#musa) | Moore Threads GPU |
-| [Metal](docs/build.md#metal-build) | Apple Silicon |
-| [OpenCL](docs/backend/OPENCL.md) | Adreno GPU |
-| [OpenVINO [In Progress]](docs/backend/OPENVINO.md) | Intel CPUs, GPUs, and NPUs |
-| [RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) | All |
-| [SYCL](docs/backend/SYCL.md) | Intel GPU |
-| [VirtGPU](docs/backend/VirtGPU.md) | VirtGPU APIR |
-| [Vulkan](docs/build.md#vulkan) | GPU |
-| [WebGPU](docs/build.md#webgpu) | All |
-| [ZenDNN](docs/build.md#zendnn) | AMD CPU |
+Then run both arms with astro-weights' HTTP runner. The arm is the `lora` scale in `extra_body`. `arm_keys=["lora"]` tells the header check that the arms may differ only there. Declare the server flags in `serving_flags`, because the client cannot read them.
 
-## Documentation
+```python
+from astro_weights.eval import check_headers, grade_exact, header_path, write_header
+from astro_weights.runners.endpoint import generate_records_http, run_header_http
 
-#### Tools
+URL, NAME = "http://127.0.0.1:8080", "base.gguf"
+FLAGS = {"--eval-mode": "on", "--parallel": "1"}
+items = [{"item_id": "i0", "prompt": "Say w5.", "gold": "w5"}]
+headers = {}
+for arm, scale in [("base", 0), ("edit", 1)]:
+    extra_body = {"lora": [{"id": 0, "scale": scale}]}  # explicit, base arm too
+    headers[arm] = run_header_http(URL, NAME, 64, 0, extra_body, serving_flags=FLAGS)
+    write_header(header_path(f"{arm}-http.jsonl"), headers[arm])
+    generate_records_http(
+        URL, NAME, items, arm, grade_exact, 64, extra_body=extra_body, out=f"{arm}-http.jsonl"
+    )
+check_headers(headers["base"], headers["edit"], arm_keys=["lora"])
+```
 
-- [cli](tools/cli/README.md)
-- [completion](tools/completion/README.md)
-- [server](tools/server/README.md)
-- [GBNF grammars](grammars/README.md)
+Then `astro-weights eval base-http.jsonl edit-http.jsonl --ignore-header`. Each response also has `gravity.lora[].scale` and the sha256 values, so you can check after the fact that the arms ran as intended. See the astro-weights docs (`docs/how-to/run-eval.md`) for the rest of the runner.
 
-#### Development
+## Measured
 
-- [How to build](docs/build.md)
-- [Running on Docker](docs/docker.md)
-- [Build on Android](docs/android.md)
-- [Multi-GPU usage](docs/multi-gpu.md)
-- [Performance troubleshooting](docs/development/token_generation_performance_tips.md)
-- [GGML tips & tricks](https://github.com/ggml-org/llama.cpp/wiki/GGML-Tips-&-Tricks)
-- [XCFramework](docs/xcframework.md)
-- [Completions](docs/completions.md)
-- [Models](docs/models.md)
-- [Release process](docs/release.md)
+From GR1, our noise-floor test. Model: Qwen3.5-9B Q4_K_M. Machine: Apple M3 Pro (Metal). Base arm only, 20 MATH-500 confirm items, card sampling with seed 0, token cap 1024. This tests determinism, not accuracy.
 
-## Contributing
+| Server | Comparison | Byte-identical answers |
+|---|---|---|
+| stock llama.cpp b12359, 1 slot | run 1 vs run 2 | 20 of 20 |
+| stock llama.cpp b12359, 4 slots | vs the 1-slot run | 3 of 20 |
+| gravity `--eval-mode` (1 slot), Mac (Metal) | base arm rerun | 20 of 20 |
+| gravity `--eval-mode` (1 slot), Linux (CUDA) | base arm rerun | 20 of 20 |
 
-- Contributors can open PRs
-- Collaborators will be invited based on contributions
-- Maintainers can push to branches in the `llama.cpp` repo and merge PRs into the `master` branch
-- Any help with managing issues, PRs and projects is very appreciated!
-- Read the [CONTRIBUTING.md](CONTRIBUTING.md) for more information
+In the same test, a fresh stock server with `--lora-init-without-apply` ran the adapter at scale 1.0 for a request without `lora` (5 of 5 prompts).
 
-## Acknowledgements
+## Upstream base and rebase policy
+
+- Base: llama.cpp `v1.0.0`, commit `b1b770d90d94`.
+- Move the base only to an upstream `v*` release, at most once a month, each move its own pull request.
+- gravity's changes stay as separate commits on top of the base.
+
+Details: [UPSTREAM.md](UPSTREAM.md).
+
+## Licence
+
+MIT. Copyright (c) 2023-2026 The ggml authors. See [LICENSE](LICENSE). gravity is built on llama.cpp by the ggml authors.
+
+Dependencies:
 
 - [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) - Single-header HTTP server, used by `llama-server` - MIT license
 - [nothings/stb](https://github.com/nothings/stb) - Single-header image format decoder, used by multimodal subsystem - Public domain
