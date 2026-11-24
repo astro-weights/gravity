@@ -10,7 +10,6 @@ LORA_FILE_URL = "https://huggingface.co/ggml-org-dev/stories15M_MOE/resolve/main
 def create_server():
     global server
     server = ServerPreset.stories15m_moe()
-    server.server_port = 18481  # own port, other suites run in parallel on 8080
     server.lora_files = [download_file(LORA_FILE_URL)]
 
 
