@@ -1,6 +1,132 @@
 #pragma once
 
-// gravity streaming: read-pool (stub, filled by its task)
+// gravity streaming: pread thread pool with per-request status and cancel
+
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 namespace gravity {
+
+// RAII aligned heap buffer; size rounds up to alignment. ok() false on bad alignment or alloc failure.
+class aligned_buffer {
+  public:
+    aligned_buffer() = default;
+    aligned_buffer(size_t size, size_t alignment);
+    ~aligned_buffer();
+
+    aligned_buffer(aligned_buffer && other) noexcept;
+    aligned_buffer & operator=(aligned_buffer && other) noexcept;
+    aligned_buffer(const aligned_buffer &)             = delete;
+    aligned_buffer & operator=(const aligned_buffer &) = delete;
+
+    bool   ok() const { return ptr != nullptr; }
+    void * data() const { return ptr; }
+    size_t size() const { return n; }
+    size_t alignment() const { return align; }
+
+  private:
+    void * ptr   = nullptr;
+    size_t n     = 0;
+    size_t align = 0;
+};
+
+using read_id = uint64_t; // 0 = invalid
+
+struct read_req {
+    int      fd           = -1;
+    uint64_t offset       = 0;
+    size_t   len          = 0;
+    void *   dst          = nullptr;
+    uint64_t tag          = 0;
+    size_t   alignment    = 0;     // > 0 for a direct fd: offset, len and dst must be multiples (checked at submit)
+    bool     allow_partial = false; // EOF before len counts as ok with fewer bytes
+};
+
+enum class read_status {
+    ok,
+    error,
+    cancelled,
+};
+
+const char * read_status_name(read_status st);
+
+struct read_completion {
+    uint64_t    tag    = 0;
+    size_t      bytes  = 0;
+    read_status status = read_status::error;
+    int         err    = 0; // errno, 0 if none
+    std::string error;
+};
+
+struct submit_result {
+    read_id     id = 0;
+    std::string error;
+
+    bool ok() const { return id != 0; }
+};
+
+// One blocking read with the same rules as the pool workers: retries EINTR and short reads.
+read_completion read_full(const read_req & req);
+
+// Empty string if req is valid.
+std::string validate_read_req(const read_req & req);
+
+using read_fn = std::function<read_completion(const read_req &)>;
+
+class read_pool {
+  public:
+    // fn is the OS read; tests inject a fake. Default read_full.
+    explicit read_pool(int n_threads, read_fn read = read_full);
+    ~read_pool(); // shutdown()
+
+    read_pool(const read_pool &)             = delete;
+    read_pool & operator=(const read_pool &) = delete;
+
+    // Thread safe. Bad request or pool shut down -> id 0 and error text.
+    submit_result submit(const read_req & req);
+
+    // Block until done, then forget the id. Unknown or already collected id -> error completion.
+    read_completion wait(read_id id);
+
+    // Non-blocking. true + fill out (and forget the id) when done; unknown id also returns true with an error.
+    bool poll(read_id id, read_completion & out);
+
+    // Best effort: true only if the request had not started; it then completes as cancelled.
+    bool cancel(read_id id);
+
+    // Queued requests complete as cancelled, running ones finish, threads join. Idempotent.
+    void shutdown();
+
+    size_t n_threads() const { return workers.size(); }
+
+  private:
+    struct slot {
+        read_req        req;
+        bool            started = false;
+        bool            done    = false;
+        read_completion comp;
+    };
+
+    void worker();
+    bool take_done(read_id id, read_completion & out); // lock held
+
+    read_fn                           fn;
+    std::mutex                        mtx;
+    std::condition_variable           work_cv;
+    std::condition_variable           done_cv;
+    std::deque<read_id>               queue;
+    std::unordered_map<read_id, slot> slots;
+    std::vector<std::thread>          workers;
+    read_id                           next_id  = 1;
+    bool                              stopping = false;
+};
+
 } // namespace gravity
