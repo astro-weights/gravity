@@ -125,9 +125,12 @@ static void fill_resid_gate(std::vector<float> & dst, const char * name, const t
 }
 
 // a random router bias can tie within the noise between the backends, a ramp keeps the top-k selection the same
+// gravity stream test: a flat bias instead, see test_gravity_stream
+static bool g_flat_exp_probs_b = false;
+
 static void fill_exp_probs_b(std::vector<float> & dst, const char *, const tensor_data_params &) {
     for (size_t i = 0; i < dst.size(); i++) {
-        dst[i] = 2.0f*i;
+        dst[i] = g_flat_exp_probs_b ? 0.0f : 2.0f*i;
     }
 }
 
@@ -1194,20 +1197,32 @@ static std::string get_device_label(ggml_backend_dev_t dev) {
 }
 
 // gravity stream: set by the log callback of test_backends
-static std::atomic<bool> g_stream_active   = false;
-static std::atomic<bool> g_stream_fallback = false;
+static std::atomic<bool>   g_stream_active   = false;
+static std::atomic<bool>   g_stream_fallback = false;
+static std::atomic<bool>   g_stream_changed  = false;
+static std::atomic<size_t> g_cache_slots     = 0; // MoE cache slots of the last context
+static std::atomic<size_t> g_cache_misses    = 0; // MoE cache misses of the last context, logged when it is freed
 
-// gravity stream: the MoE cache reads its misses from the model file, the logits must be bit-identical to logits_ref
-// io: LLAMA_GRAVITY_STREAM_IO; truncate: cut the file once the context exists, so the reads past the cut fail and fall back to host memory
-static std::string check_gravity_stream(
-        const std::string & path, const std::vector<llama_token> & tokens, const std::vector<float> & logits_ref,
-        const std::vector<ggml_backend_dev_t> & devs, const llama_model_tensor_buft_override * tensor_buft_overrides,
-        const size_t moe_cache_size, const bool encode, const char * io, const bool truncate) {
-#ifdef _WIN32
-    GGML_UNUSED(path); GGML_UNUSED(tokens); GGML_UNUSED(logits_ref); GGML_UNUSED(devs); GGML_UNUSED(tensor_buft_overrides);
-    GGML_UNUSED(moe_cache_size); GGML_UNUSED(encode); GGML_UNUSED(io); GGML_UNUSED(truncate);
-    return "";
-#else
+enum class stream_case { off, page, direct, replaced, truncated };
+
+static const char * stream_case_name(stream_case sc) {
+    switch (sc) {
+        case stream_case::off:       return "off";
+        case stream_case::page:      return "page";
+        case stream_case::direct:    return "direct";
+        case stream_case::replaced:  return "replaced";
+        case stream_case::truncated: return "truncated";
+    }
+    return "?";
+}
+
+#ifndef _WIN32
+// one context with the MoE cache on the model file at path, returns an error or ""
+// replaced: another file is renamed over path after load, the stream must not read it; truncated: the file is cut once the context exists, the reads past the cut fall back
+static std::string run_gravity_stream(
+        const std::string & path, const std::vector<llama_token> & tokens, const std::vector<ggml_backend_dev_t> & devs,
+        const llama_model_tensor_buft_override * tensor_buft_overrides, const size_t moe_cache_size, const stream_case sc,
+        std::vector<float> & logits) {
     llama_model_params model_params = llama_model_default_params();
     model_params.progress_callback = silent_model_load_progress;
     std::vector<ggml_backend_dev_t> devs_copy = devs;
@@ -1216,10 +1231,26 @@ static std::string check_gravity_stream(
     model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
     model_params.tensor_buft_overrides = tensor_buft_overrides;
     // without mmap, the host experts do not read the truncated file
-    model_params.load_mode = truncate ? LLAMA_LOAD_MODE_NONE : LLAMA_LOAD_MODE_MMAP;
+    model_params.load_mode = sc == stream_case::truncated ? LLAMA_LOAD_MODE_NONE : LLAMA_LOAD_MODE_MMAP;
     llama_model_ptr model(llama_model_load_from_file(path.c_str(), model_params));
     if (!model) {
         return "load failed";
+    }
+
+    const std::string path_orig = path + ".orig";
+    if (sc == stream_case::replaced) {
+        // same size, other bytes in the second half, new inode
+        const std::string path_new = path + ".new";
+        std::filesystem::copy_file(path, path_orig, std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::copy_file(path, path_new, std::filesystem::copy_options::overwrite_existing);
+        FILE * f = fopen(path_new.c_str(), "r+b");
+        GGML_ASSERT(f != nullptr);
+        const size_t size = std::filesystem::file_size(path_new);
+        std::vector<uint8_t> junk(size - size/2, 0x5a);
+        fseek(f, (long) (size/2), SEEK_SET);
+        fwrite(junk.data(), 1, junk.size(), f);
+        fclose(f);
+        std::filesystem::rename(path_new, path);
     }
 
     llama_context_params ctx_params = llama_context_default_params();
@@ -1228,32 +1259,85 @@ static std::string check_gravity_stream(
     ctx_params.n_threads_batch = 4;
     ctx_params.moe_cache_size = moe_cache_size;
     ctx_params.n_ubatch = 2;
-    ctx_params.gravity_stream = true;
+    ctx_params.gravity_stream = sc != stream_case::off;
     ctx_params.gravity_stream_threads = 2;
 
-    setenv("LLAMA_GRAVITY_STREAM_IO", io, 1);
+    setenv("LLAMA_GRAVITY_STREAM_IO", sc == stream_case::direct ? "direct" : "page", 1);
     g_stream_active   = false;
     g_stream_fallback = false;
+    g_stream_changed  = false;
+    g_cache_slots     = 0;
+    g_cache_misses    = 0;
     llama_context_ptr lctx(llama_init_from_model(model.get(), ctx_params));
     unsetenv("LLAMA_GRAVITY_STREAM_IO");
+    if (sc == stream_case::replaced) {
+        std::filesystem::rename(path_orig, path);
+    }
     if (!lctx) {
         return "context failed";
     }
-    if (!g_stream_active) {
-        return "stream not active";
+    if (sc == stream_case::replaced) {
+        if (g_stream_active || !g_stream_changed) {
+            return "stream read a replaced file";
+        }
+    } else if ((sc != stream_case::off) != g_stream_active) {
+        return "stream active state wrong";
     }
-    if (truncate) {
+    if (sc == stream_case::truncated) {
         std::filesystem::resize_file(path, std::filesystem::file_size(path)/2);
     }
 
-    const std::vector<float> logits = get_logits(model.get(), lctx.get(), tokens, encode);
-    if (logits.size() != logits_ref.size() || memcmp(logits.data(), logits_ref.data(), logits.size()*sizeof(float)) != 0) {
-        return "logits differ";
+    logits = get_logits(model.get(), lctx.get(), tokens, false);
+    lctx.reset(); // logs the cache stats
+
+    if (g_cache_slots == 0 || g_cache_misses <= g_cache_slots) {
+        return "no evictions, misses = " + std::to_string(g_cache_misses) + ", slots = " + std::to_string(g_cache_slots);
     }
-    if (truncate && !g_stream_fallback) {
+    if (sc == stream_case::truncated && !g_stream_fallback) {
         return "no fallback";
     }
     return "";
+}
+#endif
+
+// gravity stream: the MoE cache reads its misses from the model file, the logits must be bit-identical to the stream off
+// the model gets a flat router bias, so the tokens use many experts and the few slots of the cache are evicted and refilled
+static std::string test_gravity_stream(
+        struct gguf_context * gguf_ctx, const size_t seed, const float stdev, const std::vector<llama_token> & tokens,
+        const std::vector<ggml_backend_dev_t> & devs, const llama_model_tensor_buft_override * tensor_buft_overrides, const size_t moe_cache_size) {
+#ifdef _WIN32
+    GGML_UNUSED(gguf_ctx); GGML_UNUSED(seed); GGML_UNUSED(stdev); GGML_UNUSED(tokens); GGML_UNUSED(devs);
+    GGML_UNUSED(tensor_buft_overrides); GGML_UNUSED(moe_cache_size);
+    return "";
+#else
+    const std::string path = get_tmp_gguf_path();
+    {
+        g_flat_exp_probs_b = true;
+        llama_model_ptr model = get_model(gguf_ctx, nullptr, seed, stdev, devs, LLAMA_SPLIT_MODE_LAYER, tensor_buft_overrides);
+        g_flat_exp_probs_b = false;
+        llama_model_save_to_file(model.get(), path.c_str());
+    }
+
+    std::string res;
+    std::vector<float> logits_ref;
+    // truncated last, it cuts the file
+    for (stream_case sc : { stream_case::off, stream_case::page, stream_case::direct, stream_case::replaced, stream_case::truncated }) {
+        std::vector<float> logits;
+        std::string err = run_gravity_stream(path, tokens, devs, tensor_buft_overrides, moe_cache_size, sc, logits);
+        if (err.empty() && sc == stream_case::off) {
+            logits_ref = logits;
+        } else if (err.empty() && (logits.size() != logits_ref.size() || memcmp(logits.data(), logits_ref.data(), logits.size()*sizeof(float)) != 0)) {
+            err = "logits differ";
+        }
+        if (!err.empty()) {
+            res += std::string(res.empty() ? "" : "; ") + stream_case_name(sc) + ": " + err;
+            if (sc == stream_case::off) {
+                break;
+            }
+        }
+    }
+    std::filesystem::remove(path);
+    return res;
 #endif
 }
 
@@ -1277,6 +1361,16 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
         if (strstr(text, "gravity stream: ") != nullptr) {
             g_stream_active   = g_stream_active   || strstr(text, "expert tensors read from") != nullptr;
             g_stream_fallback = g_stream_fallback || strstr(text, "read failed") != nullptr;
+            g_stream_changed  = g_stream_changed  || strstr(text, "changed since load") != nullptr;
+        }
+        if (const char * p = strstr(text, " slots ("); p != nullptr && strstr(text, " layers, ") != nullptr) {
+            while (p > text && p[-1] >= '0' && p[-1] <= '9') {
+                p--;
+            }
+            g_cache_slots += strtoull(p, nullptr, 10);
+        }
+        if (const char * p = strstr(text, "misses = "); p != nullptr && strstr(text, "llama_moe_cache: ubatch") != nullptr) {
+            g_cache_misses += strtoull(p + strlen("misses = "), nullptr, 10);
         }
         int verbosity = common_log_get_verbosity(level);
         if (verbosity <= ud->verbosity) {
@@ -1347,6 +1441,10 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
                 }
             }
         }
+    }
+
+    if (std::none_of(dev_configs.begin(), dev_configs.end(), [](const device_config & dc) { return dc.moe_cache_size > 0; })) {
+        LOG("gravity stream: skipped (no GPU)\n");
     }
 
     size_t max_arch_name_length = 0;
@@ -1505,16 +1603,12 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
                             }
                         }
 
-                        // gravity stream: page cache reads, direct reads, and reads that fail and fall back (last, it truncates the file)
                         if (dc.moe_cache_size > 0) {
-                            const std::pair<const char *, bool> cases[] = { { "page", false }, { "direct", false }, { "page", true } };
-                            for (const auto & [io, truncate] : cases) {
-                                const std::string err = check_gravity_stream(path, tokens, logits_dev, dc.devs, overrides, dc.moe_cache_size, encode, io, truncate);
-                                if (!err.empty()) {
-                                    LOG_ERR("%s: gravity stream (%s%s): %s\n", llama_arch_name(arch), io, truncate ? ", truncated" : "", err.c_str());
-                                    test_ok = false;
-                                    status_roundtrip = "\033[1;31mFAIL\033[0m";
-                                }
+                            const std::string err = test_gravity_stream(gguf_ctx.get(), seed, stdev, tokens, dc.devs, overrides, dc.moe_cache_size);
+                            if (!err.empty()) {
+                                LOG_ERR("%s: gravity stream: %s\n", llama_arch_name(arch), err.c_str());
+                                test_ok = false;
+                                status_roundtrip = "\033[1;31mFAIL\033[0m";
                             }
                         }
 

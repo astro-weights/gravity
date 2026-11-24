@@ -951,6 +951,14 @@ struct llama_model {
 
     // gravity stream: model file paths ("" if not loaded from a path) and file + data offset of the expert tensors, by name
     std::vector<std::string> gravity_files;
+    struct gravity_file_id {
+        uint64_t dev   = 0;
+        uint64_t ino   = 0;
+        uint64_t size  = 0;
+        int64_t  mtime = 0;
+        bool     ok    = false; // false if not known (FILE pointer, Windows)
+    };
+    std::vector<gravity_file_id> gravity_file_ids; // [gravity_files.size()] identity of each file at load, the stream reads only an unchanged file
     std::unordered_map<std::string, std::pair<uint16_t, size_t>> gravity_exps_offs;
 
     // statically allocated context for assigning

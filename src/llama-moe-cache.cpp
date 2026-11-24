@@ -379,11 +379,14 @@ struct moe_cache_stream {
     }
 
     // returns an empty string on success, else why the stream is off
-    std::string init(const llama_model & model, const std::vector<const ggml_tensor *> & experts, int32_t n_threads) {
+    // max_fill_bytes, max_fill_pieces: the most bytes and runs one copy() can upload, they size the staging buffer
+    std::string init(const llama_model & model, const std::vector<const ggml_tensor *> & experts, int32_t n_threads, size_t max_fill_bytes, size_t max_fill_pieces) {
 #ifdef _WIN32
         GGML_UNUSED(model);
         GGML_UNUSED(experts);
         GGML_UNUSED(n_threads);
+        GGML_UNUSED(max_fill_bytes);
+        GGML_UNUSED(max_fill_pieces);
         return "not supported on this platform";
 #else
         const size_t n_files = model.gravity_files.size();
@@ -444,15 +447,34 @@ struct moe_cache_stream {
                 if (df.ok()) {
                     fds[i]    = df.fd;
                     aligns[i] = df.alignment;
-                    max_align = std::max(max_align, df.alignment);
-                    n_direct++;
-                    continue;
+                } else {
+                    LLAMA_LOG_WARN("llama_moe_cache: gravity stream: direct open of %s failed (%s), using the page cache\n", path.c_str(), df.error.c_str());
                 }
-                LLAMA_LOG_WARN("llama_moe_cache: gravity stream: direct open of %s failed (%s), using the page cache\n", path.c_str(), df.error.c_str());
             }
-            fds[i] = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fds[i] < 0) {
+                fds[i] = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            }
             if (fds[i] < 0) {
                 return "failed to open " + path + ": " + strerror(errno);
+            }
+
+            // the path can point to another file than the one loaded (re-download, rename over it): its bytes would not match the host experts
+            struct stat st;
+            const bool same = i < model.gravity_file_ids.size() && model.gravity_file_ids[i].ok && fstat(fds[i], &st) == 0 &&
+                model.gravity_file_ids[i].dev   == (uint64_t) st.st_dev  &&
+                model.gravity_file_ids[i].ino   == (uint64_t) st.st_ino  &&
+                model.gravity_file_ids[i].size  == (uint64_t) st.st_size &&
+                model.gravity_file_ids[i].mtime == (int64_t)  st.st_mtime;
+            if (!same) {
+                LLAMA_LOG_WARN("llama_moe_cache: gravity stream: model file %s changed since load, its experts are read from host memory\n", path.c_str());
+                close(fds[i]);
+                fds[i]    = -1;
+                aligns[i] = 0;
+                continue;
+            }
+            if (aligns[i] > 0) {
+                max_align = std::max(max_align, aligns[i]);
+                n_direct++;
             }
         }
 
@@ -471,15 +493,18 @@ struct moe_cache_stream {
             return "no host expert tensor matches its model file";
         }
 
-        // max_staging holds at least one piece of the max size plus the rounding of a direct read
-        staging = gravity::aligned_buffer(max_staging, std::max<size_t>(max_align, 64));
+        // room for the largest fill, each run with the rounding of a direct read and the alignment of its position, at most max_staging
+        // a piece is at most the staging size minus the rounding, so the first piece of a batch always fits
+        const size_t buf_align = std::max<size_t>(max_align, 64);
+        const size_t need      = max_fill_bytes + max_fill_pieces*(2*max_align + buf_align);
+        staging = gravity::aligned_buffer(std::min(max_staging, std::max(need, 4*max_align + buf_align)), buf_align);
         if (!staging.ok()) {
             return "failed to allocate the staging buffer";
         }
         pool = std::make_unique<gravity::read_pool>(n_threads);
 
-        LLAMA_LOG_INFO("llama_moe_cache: gravity stream: %zu of %zu expert tensors read from %.2f MiB of model files, %zu direct fds, %d threads (%s)\n",
-            sources.size(), experts.size(), model_bytes/1024.0/1024.0, n_direct, n_threads, reason.c_str());
+        LLAMA_LOG_INFO("llama_moe_cache: gravity stream: %zu of %zu expert tensors read from %.2f MiB of model files, %zu direct fds, %d threads, %.2f MiB staging (%s)\n",
+            sources.size(), experts.size(), model_bytes/1024.0/1024.0, n_direct, n_threads, staging.size()/1024.0/1024.0, reason.c_str());
         return "";
 #endif
     }
@@ -487,7 +512,7 @@ struct moe_cache_stream {
     // upload the fills of one layer, returns the bytes uploaded
     template <typename F>
     size_t upload(const std::vector<ggml_tensor *> & experts, const std::vector<ggml_tensor *> & banks, const std::vector<F> & fills) {
-        const size_t max_piece = max_staging - 2*max_align;
+        const size_t max_piece = staging.size() - 2*max_align;
         size_t bytes = 0;
         pieces.clear();
         for (size_t ip = 0; ip < experts.size(); ++ip) {
@@ -933,7 +958,19 @@ struct llama_moe_cache::impl {
                 LLAMA_LOG_INFO("%s: gravity stream: no MoE cache active, ignored\n", __func__);
             } else {
                 stream = std::make_unique<moe_cache_stream>();
-                const std::string err = stream->init(model, experts, stream_threads);
+                // a copy() fills at most n_slots experts of one layer, each a run of its own at worst
+                size_t max_fill_bytes  = 0;
+                size_t max_fill_pieces = 0;
+                for (const group & g : groups) {
+                    const size_t n = std::min<size_t>(g.n_slots, g.ref[0]->ne[2]);
+                    size_t expert_bytes = 0;
+                    for (const ggml_tensor * t : g.ref) {
+                        expert_bytes += t->nb[2];
+                    }
+                    max_fill_bytes  = std::max(max_fill_bytes, n*expert_bytes);
+                    max_fill_pieces = std::max(max_fill_pieces, n*g.ref.size());
+                }
+                const std::string err = stream->init(model, experts, stream_threads, max_fill_bytes, max_fill_pieces);
                 if (!err.empty()) {
                     LLAMA_LOG_WARN("%s: gravity stream: %s, the misses are read from host memory\n", __func__, err.c_str());
                     stream.reset();
