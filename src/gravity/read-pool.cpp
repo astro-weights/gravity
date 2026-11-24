@@ -219,7 +219,7 @@ submit_result read_pool::submit(const read_req & req) {
         sl.req = req;
         st->slots.emplace(id, std::move(sl));
         try {
-            st->queue.push_back(id);
+            (req.priority == read_priority::prefetch ? st->prefetch_queue : st->queue).push_back(id);
         } catch (...) {
             st->slots.erase(id);
             throw;
@@ -279,7 +279,8 @@ bool read_pool::cancel(read_id id) {
     if (it == st->slots.end() || it->second.started || it->second.done) {
         return false;
     }
-    st->queue.erase(std::remove(st->queue.begin(), st->queue.end(), id), st->queue.end());
+    auto & q = it->second.req.priority == read_priority::prefetch ? st->prefetch_queue : st->queue;
+    q.erase(std::remove(q.begin(), q.end(), id), q.end());
     slot & sl       = it->second;
     sl.done         = true;
     sl.comp         = read_completion();
@@ -298,15 +299,17 @@ void read_pool::shutdown() {
     {
         std::lock_guard<std::mutex> lock(st->mtx);
         st->stopping = true;
-        for (read_id id : st->queue) {
-            slot & sl      = st->slots[id];
-            sl.done        = true;
-            sl.comp        = read_completion();
-            sl.comp.tag    = sl.req.tag;
-            sl.comp.status = read_status::cancelled;
-            sl.comp.error  = "cancelled: pool shut down";
+        for (auto * q : { &st->queue, &st->prefetch_queue }) {
+            for (read_id id : *q) {
+                slot & sl      = st->slots[id];
+                sl.done        = true;
+                sl.comp        = read_completion();
+                sl.comp.tag    = sl.req.tag;
+                sl.comp.status = read_status::cancelled;
+                sl.comp.error  = "cancelled: pool shut down";
+            }
+            q->clear();
         }
-        st->queue.clear();
         to_join.swap(st->workers);
         st->work_cv.notify_all();
         st->done_cv.notify_all();
@@ -324,12 +327,13 @@ void read_pool::shutdown() {
 void read_pool::worker(const std::shared_ptr<state> & st) {
     std::unique_lock<std::mutex> lock(st->mtx);
     for (;;) {
-        st->work_cv.wait(lock, [&] { return st->stopping || !st->queue.empty(); });
-        if (st->queue.empty()) {
+        st->work_cv.wait(lock, [&] { return st->stopping || st->has_queued(); });
+        if (!st->has_queued()) {
             return; // stopping
         }
-        const read_id id = st->queue.front();
-        st->queue.pop_front();
+        auto &        q  = st->queue.empty() ? st->prefetch_queue : st->queue;
+        const read_id id = q.front();
+        q.pop_front();
         auto it = st->slots.find(id);
         if (it == st->slots.end()) {
             continue;

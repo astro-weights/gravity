@@ -140,6 +140,7 @@ void scheduler::issue(const fill_ptr & f, size_t max, std::vector<std::pair<read
         req.dst           = base + rel;
         req.alignment     = align;
         req.allow_partial = align > 0;  // rounded up end may pass EOF; apply() checks the span bytes
+        req.priority      = f->prefetch ? read_priority::prefetch : read_priority::demand;
         submit_result s   = pool.submit(req);
         if (!s.ok()) {
             fail(f, "submit: " + s.error);
