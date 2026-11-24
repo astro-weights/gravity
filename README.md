@@ -12,7 +12,7 @@ Two things we hit on stock llama.cpp (build b12359, Qwen3.5-9B Q4_K_M, Apple M3 
 - **Pinned files.** `--model-sha256` and `--lora-sha256` check the base model and each adapter before loading. A wrong file stops the server and names both hashes.
 - **Eval mode.** `--eval-mode` turns on one slot and no prompt cache, starts every adapter at strength 0, and fills any missing sampling field with a fixed default. On our test model the base arm reran byte-identical, 20 of 20 answers, on a Mac (Metal) and on Linux (CUDA).
 - **Strict `lora` lists.** Bad `lora` entries get HTTP 400 instead of being ignored.
-- **A receipt on every response.** Each answer reports the strength and sha256 of every adapter, the model's sha256, which fields gravity filled or overrode, and the device that ran it.
+- **A receipt on every answer in eval mode.** Each answer reports the strength and sha256 of every adapter, the model's sha256, which fields gravity filled or overrode, and the device that ran it.
 
 ## Not built yet
 These are on the roadmap, not in the code:
