@@ -35,8 +35,8 @@ struct expert_index {
 // true for blk.N.ffn_{gate,up,down,gate_up}_exps.weight
 bool is_moe_expert_tensor(const std::string & name);
 
-// Run this LAST. llama-quantize and gguf-split copy general.alignment = 4096 and the index keys but
-// write 32-aligned tensors, so their output is unloadable or stale: quantize/split the original, then repack.
+// Run this LAST. llama-quantize and gguf-split copy general.alignment = 4096 and the index keys, so their
+// output still loads, but the copied index is stale once tensor types/sizes change (read_expert_index fails): quantize/split the original, then repack.
 // refuses in == out and non-MoE input. Writes out + ".tmp.<pid>" then renames; tmp removed on failure
 status repack_gguf(const std::string & in, const std::string & out);
 

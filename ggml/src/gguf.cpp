@@ -1235,10 +1235,25 @@ size_t gguf_get_tensor_size(const struct gguf_context * ctx, int64_t tensor_id) 
     return ggml_nbytes(&ctx->info[tensor_id].t);
 }
 
+// gravity: keep ctx->alignment in sync with general.alignment so the writer pads like the header says
+static void gguf_update_alignment(struct gguf_context * ctx, size_t alignment) {
+    if (ctx->alignment == alignment) {
+        return;
+    }
+    ctx->alignment = alignment;
+    // gravity: tensors already added were laid out with the old alignment
+    for (size_t i = 0; i < ctx->info.size(); ++i) {
+        ctx->info[i].offset = i == 0 ? 0 : ctx->info[i - 1].offset + GGML_PAD(ggml_nbytes(&ctx->info[i - 1].t), ctx->alignment);
+    }
+}
+
 int64_t gguf_remove_key(struct gguf_context * ctx, const char * key) {
     const int64_t key_id = gguf_find_key(ctx, key);
     if (key_id >= 0) {
         ctx->kv.erase(ctx->kv.begin() + key_id);
+        if (strcmp(key, GGUF_KEY_GENERAL_ALIGNMENT) == 0) {
+            gguf_update_alignment(ctx, GGUF_DEFAULT_ALIGNMENT); // gravity
+        }
     }
     return key_id;
 }
@@ -1283,6 +1298,9 @@ void gguf_set_val_u32(struct gguf_context * ctx, const char * key, uint32_t val)
     gguf_check_reserved_keys(key, val);
     gguf_remove_key(ctx, key);
     ctx->kv.emplace_back(key, val);
+    if (strcmp(key, GGUF_KEY_GENERAL_ALIGNMENT) == 0) {
+        gguf_update_alignment(ctx, val); // gravity
+    }
 }
 
 void gguf_set_val_i32(struct gguf_context * ctx, const char * key, int32_t val) {
