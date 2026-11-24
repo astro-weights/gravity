@@ -2,9 +2,11 @@ name: macOS build
 
 # Hosted macOS on release tags only. Private repo on GitHub Free: macOS costs $0.062/min against the
 # $12/month allowance (about 193 min), so one run is capped at 25 min. Never on a self-hosted runner.
+# workflow_dispatch: manual dry run (build + smoke test). The job uploads nothing, so any ref is safe.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
