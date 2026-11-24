@@ -2,7 +2,7 @@
 
 namespace gravity {
 
-slot_ring::slot_ring(size_t n_slots, size_t slot_bytes, size_t alignment) : bytes(slot_bytes) {
+slot_ring::slot_ring(size_t n_slots, size_t slot_bytes, size_t alignment) : bytes(slot_bytes), align(alignment) {
     if (n_slots == 0 || slot_bytes == 0) {
         err = "slot ring needs n_slots > 0 and slot_bytes > 0";
         return;
@@ -64,7 +64,8 @@ acquire_result slot_ring::acquire(const expert_key & key) {
         }
     }
     if (victim < 0) {
-        res.error = "all " + std::to_string(slots.size()) + " slots pinned";
+        res.error      = "all " + std::to_string(slots.size()) + " slots pinned";
+        res.all_pinned = true;
         return res;
     }
     entry & e = slots[victim];

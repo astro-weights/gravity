@@ -22,7 +22,13 @@ scheduler::scheduler(read_pool &   pool_in,
     cfg.chunk                 = std::max(cfg.chunk, a);
     cfg.chunk                 = (cfg.chunk + a - 1) / a * a;  // direct reads need chunk offsets on the alignment
     cfg.max_prefetch_inflight = std::max<size_t>(cfg.max_prefetch_inflight, 1);
-    if (!cfg.deterministic) {
+    if (!ring.ok()) {
+        err = "slot ring: " + ring.error();
+    } else if (align > 0 && ring.alignment() % align != 0) {
+        err = "slot ring alignment " + std::to_string(ring.alignment()) + " does not fit read alignment " +
+              std::to_string(align);
+    }
+    if (err.empty() && !cfg.deterministic) {
         try {
             worker = std::thread([this] { collector(); });
         } catch (...) {
@@ -83,8 +89,9 @@ std::string scheduler::make_fill(const expert_key & key, fill_ptr & out) {
     return "";
 }
 
-std::string scheduler::bind_slot(const fill_ptr & f) {
+std::string scheduler::bind_slot(const fill_ptr & f, bool & all_pinned) {
     acquire_result a = ring.acquire(f->key);
+    all_pinned       = a.all_pinned;
     if (!a.ok()) {
         return a.error;
     }
@@ -102,9 +109,22 @@ void scheduler::issue(const fill_ptr & f, size_t max, std::vector<std::pair<read
         return;
     }
     if (f->slot < 0) {
-        std::string err = bind_slot(f);
-        if (!err.empty()) {
-            fail(f, err);
+        bool        full = false;
+        std::string e    = bind_slot(f, full);
+        if (!e.empty() && full && f->prefetch) {
+            // ring full of pinned slots: prefetch is only a hint, so skip it quietly
+            st.prefetch_skipped_full++;
+            f->next_chunk = f->n_chunks;
+            f->prefetch   = false;
+            auto qt       = std::find(queue.begin(), queue.end(), f);
+            if (qt != queue.end()) {
+                queue.erase(qt);
+            }
+            maybe_finish(f);
+            return;
+        }
+        if (!e.empty()) {
+            fail(f, e);
             return;
         }
     }
@@ -253,6 +273,9 @@ demand_result scheduler::finish_demand(const fill_ptr & f) {
         r.error = f->error.empty() ? "fill failed" : f->error;
         return r;
     }
+    if (!track_pin(f->slot, r)) {
+        return r;
+    }
     r.slot = f->slot;
     r.data = (const uint8_t *) ring.data(f->slot) + (f->span.offset - f->rd_off);
     r.len  = (size_t) f->span.len;
@@ -262,6 +285,10 @@ demand_result scheduler::finish_demand(const fill_ptr & f) {
 demand_result scheduler::demand(const expert_key & key) {
     std::unique_lock<std::mutex> lock(mtx);
     demand_result                r;
+    if (!err.empty()) {
+        r.error = err;
+        return r;
+    }
     if (stopping) {
         r.error = "scheduler shut down";
         return r;
@@ -288,15 +315,17 @@ demand_result scheduler::demand(const expert_key & key) {
             if (a.ok() && a.hit && a.ready) {
                 st.demand_hits++;
                 expert_span sp;
-                if (locate && locate(key, sp)) {
+                if (locate && locate(key, sp) && track_pin(a.slot, r)) {
                     const uint64_t a_ = align > 0 ? align : 1;
                     r.slot            = a.slot;
                     r.data            = (const uint8_t *) ring.data(a.slot) + (sp.offset - sp.offset / a_ * a_);
                     r.len             = (size_t) sp.len;
                     return r;
                 }
-                ring.unpin(a.slot);
-                r.error = "unknown expert";
+                if (r.error.empty()) {
+                    ring.unpin(a.slot);
+                    r.error = "unknown expert";
+                }
                 return r;
             }
             if (a.ok()) {
@@ -329,12 +358,35 @@ demand_result scheduler::demand(const expert_key & key) {
     return finish_demand(f);
 }
 
+bool scheduler::track_pin(int slot, demand_result & r) {
+    try {
+        demand_pins[slot]++;
+    } catch (...) {
+        ring.unpin(slot);
+        r.error = "out of memory";
+        return false;
+    }
+    return true;
+}
+
 bool scheduler::release(int slot) {
+    std::lock_guard<std::mutex> lock(mtx);
+    auto                        it = demand_pins.find(slot);
+    if (it == demand_pins.end()) {
+        return false;  // never drop a pin this caller does not own, e.g. a fill's own pin
+    }
+    if (--it->second == 0) {
+        demand_pins.erase(it);
+    }
     return ring.unpin(slot);
 }
 
 prefetch_result scheduler::prefetch(const std::vector<expert_key> & keys) {
     prefetch_result r;
+    if (!err.empty()) {
+        r.error = err;
+        return r;
+    }
     if (cfg.deterministic) {
         return r;
     }
@@ -348,8 +400,8 @@ prefetch_result scheduler::prefetch(const std::vector<expert_key> & keys) {
             continue;
         }
         fill_ptr    f;
-        std::string err = make_fill(key, f);
-        if (err.empty()) {
+        std::string e = make_fill(key, f);
+        if (e.empty()) {
             try {
                 fills[key] = f;
                 try {
@@ -360,11 +412,11 @@ prefetch_result scheduler::prefetch(const std::vector<expert_key> & keys) {
                 }
                 r.queued++;
             } catch (...) {
-                err = "out of memory";
+                e = "out of memory";
             }
         }
-        if (!err.empty() && r.error.empty()) {
-            r.error = err;
+        if (!e.empty() && r.error.empty()) {
+            r.error = e;
         }
     }
     pump_prefetch();

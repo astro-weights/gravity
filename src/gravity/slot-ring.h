@@ -27,6 +27,7 @@ struct acquire_result {
     bool        hit        = false;  // key was already bound to the slot
     bool        ready      = false;  // slot holds the key bytes (hit only)
     bool        needs_fill = false;  // miss: caller must fill, then mark_ready() or fail_fill()
+    bool        all_pinned = false;  // error because no slot can be evicted
     std::string error;
 
     bool ok() const { return slot >= 0; }
@@ -62,6 +63,8 @@ class slot_ring {
 
     size_t slot_bytes() const { return bytes; }
 
+    size_t alignment() const { return align; }
+
     size_t n_slots() const { return slots.size(); }
 
     size_t n_free() const;  // no key and no pins
@@ -84,6 +87,7 @@ class slot_ring {
     std::vector<entry>        slots;
     std::map<expert_key, int> index;
     size_t                    bytes = 0;
+    size_t                    align = 0;
     uint64_t                  clock = 0;
     std::string               err;
 };

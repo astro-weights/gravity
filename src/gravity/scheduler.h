@@ -54,12 +54,13 @@ struct step_result {
 };
 
 struct scheduler_stats {
-    uint64_t reads            = 0;  // chunk reads submitted to the pool
-    uint64_t demand_hits      = 0;  // key already ready
-    uint64_t demand_joined    = 0;  // waited on a fill already in flight
-    uint64_t demand_misses    = 0;  // started a new fill
-    uint64_t prefetch_filled  = 0;
-    uint64_t prefetch_dropped = 0;
+    uint64_t reads                 = 0;  // chunk reads submitted to the pool
+    uint64_t demand_hits           = 0;  // key already ready
+    uint64_t demand_joined         = 0;  // waited on a fill already in flight
+    uint64_t demand_misses         = 0;  // started a new fill
+    uint64_t prefetch_filled       = 0;
+    uint64_t prefetch_dropped      = 0;
+    uint64_t prefetch_skipped_full = 0;  // prefetch not started: every slot pinned
 };
 
 // Thread safe. The ring and pool must outlive the scheduler. Every read id it submits is collected.
@@ -73,7 +74,13 @@ class scheduler {
 
     // Blocks until the key bytes sit in a slot pinned for the caller, or an error.
     demand_result demand(const expert_key & key);
-    bool          release(int slot);  // unpin a slot from demand()
+    // Unpin one demand() pin on slot. false if this scheduler holds no demand pin there (double or unknown release).
+    bool          release(int slot);
+
+    // false if ring and alignment do not fit; demand() and prefetch() then return error()
+    bool ok() const { return err.empty(); }
+
+    const std::string & error() const { return err; }
 
     // Queue keys for background fill. Keys already ready, in flight or queued are skipped. No-op in deterministic mode.
     prefetch_result prefetch(const std::vector<expert_key> & keys);
@@ -106,11 +113,12 @@ class scheduler {
 
     // all below: lock held
     std::string   make_fill(const expert_key & key, fill_ptr & out);
-    std::string   bind_slot(const fill_ptr & f);
+    std::string   bind_slot(const fill_ptr & f, bool & all_pinned);
     // submit chunks of f; ids go to out. max = 0 means all remaining.
     void          issue(const fill_ptr & f, size_t max, std::vector<std::pair<read_id, size_t>> & out);
     void          apply(const fill_ptr & f, size_t chunk, const read_completion & c);
     void          maybe_finish(const fill_ptr & f);
+    bool          track_pin(int slot, demand_result & r);  // false: pin dropped, r.error set
     void          fail(const fill_ptr & f, const std::string & error);
     void          pump_prefetch();
     size_t        drop_queued();
@@ -148,6 +156,8 @@ class scheduler {
     std::vector<std::string> prefetch_errors;
     scheduler_stats          st;
     bool                     stopping = false;
+    std::map<int, int>       demand_pins;  // slot -> pins handed out by demand()
+    std::string              err;
     std::thread              worker;
 };
 

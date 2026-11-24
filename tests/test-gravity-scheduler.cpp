@@ -398,6 +398,10 @@ static void test_join_inflight(const synth_file & sf) {
 
     CHECK(s.prefetch({ k }).queued == 1);
     CHECK(g.wait_entered(1));
+    const int fs = ring.lookup(k);
+    CHECK(fs >= 0 && ring.pins(fs) == 1);
+    CHECK(!s.release(fs));  // fill pin is not a demand pin
+    CHECK(ring.pins(fs) == 1);
 
     demand_result r;
     std::thread   d([&] { r = s.demand(k); });
@@ -533,6 +537,112 @@ static void test_read_error(const synth_file & sf) {
     CHECK(ring.lookup(K(0, 0)) == -1);
 }
 
+static void test_release_owned(const synth_file & sf) {
+    read_pool     pool(2);
+    slot_ring     ring(4, slot_bytes_for(0), 4096);
+    scheduler_cfg cfg;
+    cfg.chunk = 4096;
+    scheduler s(pool, ring, sf.fd, 0, cfg, sf.locator());
+    CHECK(s.ok());
+
+    expert_key    k  = K(0, 9);
+    demand_result r1 = s.demand(k);
+    demand_result r2 = s.demand(k);  // hit, same slot
+    CHECK(sf.same(k, r1) && sf.same(k, r2) && r1.slot == r2.slot);
+    CHECK(ring.pins(r1.slot) == 2);
+    CHECK(s.release(r1.slot));
+    CHECK(s.release(r2.slot));
+    CHECK(ring.pins(r1.slot) == 0);
+    CHECK(!s.release(r1.slot));  // double release
+    CHECK(ring.pins(r1.slot) == 0);
+    CHECK(!s.release(99));
+    CHECK(!s.release(-1));
+
+    // a pin taken outside the scheduler is not released through it
+    CHECK(ring.pin(r1.slot));
+    CHECK(!s.release(r1.slot));
+    CHECK(ring.pins(r1.slot) == 1);
+    ring.unpin(r1.slot);
+}
+
+static void test_ctor_validate(const synth_file & sf) {
+    read_pool     pool(1);
+    scheduler_cfg cfg;
+
+    slot_ring small_align(2, slot_bytes_for(4096), 16);
+    CHECK(small_align.ok());
+    scheduler s1(pool, small_align, sf.fd, 4096, cfg, sf.locator());
+    CHECK(!s1.ok() && !s1.error().empty());
+    demand_result r = s1.demand(K(0, 0));
+    CHECK(!r.ok() && r.error == s1.error());
+    CHECK(s1.prefetch({ K(0, 1) }).error == s1.error());
+
+    slot_ring bad(0, 64, 64);
+    scheduler s2(pool, bad, sf.fd, 0, cfg, sf.locator());
+    CHECK(!s2.ok());
+    CHECK(!s2.demand(K(0, 0)).ok());
+
+    slot_ring ok_ring(2, slot_bytes_for(4096), 8192);
+    scheduler s3(pool, ok_ring, sf.fd, 4096, cfg, sf.locator());
+    CHECK(s3.ok());
+    scheduler s4(pool, ok_ring, sf.fd, 0, cfg, sf.locator());
+    CHECK(s4.ok());
+}
+
+static void test_eof_aligned(const synth_file & sf) {
+    read_pool     pool(2);
+    slot_ring     ring(2, slot_bytes_for(4096), 4096);
+    scheduler_cfg cfg;
+    cfg.chunk                           = 4096;
+    const uint64_t                    n = sf.data.size();
+    std::map<expert_key, expert_span> sp;
+    sp[K(0, 0)] = { n - 10, 100 };   // span past EOF
+    sp[K(0, 1)] = { n - 100, 100 };  // span ends at EOF, rounded read goes past it
+    scheduler     s(pool, ring, sf.fd, 4096, cfg, [&](const expert_key & key, expert_span & out) {
+        auto it = sp.find(key);
+        if (it == sp.end()) {
+            return false;
+        }
+        out = it->second;
+        return true;
+    });
+    demand_result re = s.demand(K(0, 0));
+    CHECK(!re.ok());
+    CHECK(re.error.find("short read") != std::string::npos);
+    CHECK(ring.lookup(K(0, 0)) == -1);
+    CHECK(ring.n_free() == 2);
+
+    demand_result rk = s.demand(K(0, 1));
+    CHECK(rk.ok() && rk.len == 100 && memcmp(rk.data, sf.data.data() + n - 100, 100) == 0);
+    s.release(rk.slot);
+}
+
+static void test_prefetch_full(const synth_file & sf) {
+    read_pool     pool(2);
+    slot_ring     ring(2, slot_bytes_for(0), 4096);
+    scheduler_cfg cfg;
+    cfg.chunk = 4096;
+    scheduler s(pool, ring, sf.fd, 0, cfg, sf.locator());
+
+    demand_result a = s.demand(K(1, 0));
+    demand_result b = s.demand(K(1, 1));
+    CHECK(a.ok() && b.ok());
+    CHECK(s.prefetch({ K(1, 2), K(1, 3) }).queued == 2);  // skipped at issue time, ring full
+    CHECK(s.stats().prefetch_skipped_full == 2);
+    step_result sr = s.step();
+    CHECK(sr.errors.empty() && sr.dropped == 0);
+    CHECK(ring.lookup(K(1, 2)) == -1 && ring.lookup(K(1, 3)) == -1);
+    CHECK(ring.pins(a.slot) == 1 && ring.pins(b.slot) == 1);
+
+    // demand still gets the hard error
+    CHECK(!s.demand(K(1, 4)).ok());
+    s.release(a.slot);
+    s.release(b.slot);
+    demand_result c = s.demand(K(1, 2));
+    CHECK(sf.same(K(1, 2), c));
+    s.release(c.slot);
+}
+
 static std::vector<std::pair<int, uint64_t>> det_run(const synth_file & sf) {
     std::vector<std::pair<int, uint64_t>> out;
     read_pool                             pool(4);
@@ -592,6 +702,10 @@ int main() {
     test_stale_drop(sf, true);
     test_stale_drop(sf, false);
     test_read_error(sf);
+    test_release_owned(sf);
+    test_ctor_validate(sf);
+    test_eof_aligned(sf);
+    test_prefetch_full(sf);
     test_deterministic(sf);
 #endif
     if (n_fail) {
