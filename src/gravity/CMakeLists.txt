@@ -5,6 +5,8 @@ add_library(gravity-stream STATIC
     io-mode.cpp
     read-pool.cpp
     swap-policy.cpp
+    slot-ring.cpp
+    scheduler.cpp
 )
 target_include_directories(gravity-stream PUBLIC .)
 target_compile_features(gravity-stream PUBLIC cxx_std_17)
