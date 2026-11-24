@@ -6,7 +6,13 @@
 
 #include "ggml-cpp.h"
 
+#include "gravity/io-mode.h"
+#include "gravity/mem-budget.h"
+#include "gravity/read-pool.h"
+
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +20,12 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -315,6 +327,277 @@ static bool llama_moe_cache_is_host_weight(const ggml_tensor * t) {
         ggml_backend_buffer_is_host(t->buffer);
 }
 
+// gravity stream: the misses are read from the model file into a staging buffer, then uploaded
+// the file holds the same bytes as the host experts, so the cache content and the results do not change
+struct moe_cache_stream {
+    static constexpr size_t max_staging = 64u << 20;
+
+    struct source {
+        int32_t  file;
+        uint64_t offs; // file offset of the tensor data
+    };
+
+    // a part of a run of experts that fits in the staging buffer
+    struct piece {
+        const ggml_tensor * w;
+        ggml_tensor * bank;
+        size_t   src;    // offset in w
+        size_t   dst;    // offset in bank
+        size_t   len;
+        int32_t  file;
+        uint64_t off;    // file offset of src
+        uint64_t rd_off; // read range, rounded out to the alignment of a direct fd
+        size_t   rd_len;
+        size_t   pos;    // of the read range in the staging buffer
+        gravity::read_id id;
+        bool     ok;
+    };
+
+    std::vector<int>    fds;    // -1 if the file is not used
+    std::vector<size_t> aligns; // 0 for page cache reads
+    size_t max_align = 1;
+    std::unordered_map<const ggml_tensor *, source> sources;
+    std::unique_ptr<gravity::read_pool> pool;
+    gravity::aligned_buffer staging;
+    std::vector<piece> pieces;
+
+    size_t bytes_read     = 0;
+    double read_ms        = 0.0;
+    size_t n_fallback     = 0;
+    size_t bytes_fallback = 0;
+    bool   warned         = false;
+
+    ~moe_cache_stream() {
+        pool.reset(); // no read in flight past this point
+#ifndef _WIN32
+        for (int fd : fds) {
+            if (fd >= 0) {
+                close(fd);
+            }
+        }
+#endif
+    }
+
+    // returns an empty string on success, else why the stream is off
+    std::string init(const llama_model & model, const std::vector<const ggml_tensor *> & experts, int32_t n_threads) {
+#ifdef _WIN32
+        GGML_UNUSED(model);
+        GGML_UNUSED(experts);
+        GGML_UNUSED(n_threads);
+        return "not supported on this platform";
+#else
+        const size_t n_files = model.gravity_files.size();
+        std::vector<bool> used(n_files, false);
+        for (const ggml_tensor * w : experts) {
+            const auto it = model.gravity_exps_offs.find(ggml_get_name(w));
+            if (it != model.gravity_exps_offs.end() && it->second.first < n_files && !model.gravity_files[it->second.first].empty() && ggml_is_contiguous(w)) {
+                used[it->second.first] = true;
+            }
+        }
+        if (std::none_of(used.begin(), used.end(), [](bool u) { return u; })) {
+            return "the host experts were not loaded from a model file path";
+        }
+
+        uint64_t model_bytes = 0;
+        std::vector<uint64_t> sizes(n_files, 0);
+        for (size_t i = 0; i < n_files; ++i) {
+            struct stat st;
+            if (used[i] && stat(model.gravity_files[i].c_str(), &st) == 0) {
+                sizes[i]     = (uint64_t) st.st_size;
+                model_bytes += sizes[i];
+            }
+        }
+
+        // direct IO only pays off when the model does not fit the memory budget, see gravity::choose_io_mode
+        // LLAMA_GRAVITY_STREAM_IO=direct|page overrides the choice (tests, benchmarks)
+        gravity::io_mode mode = gravity::io_mode::page_cache;
+        std::string reason;
+        const char * io_env = getenv("LLAMA_GRAVITY_STREAM_IO");
+        if (io_env != nullptr && strcmp(io_env, "direct") == 0) {
+            mode   = gravity::io_mode::direct;
+            reason = "LLAMA_GRAVITY_STREAM_IO";
+        } else if (io_env != nullptr && strcmp(io_env, "page") == 0) {
+            reason = "LLAMA_GRAVITY_STREAM_IO";
+        } else {
+            const auto mem = gravity::read_mem_info();
+            const uint64_t budget = mem.ok() ? gravity::compute_budget(mem.value, {}) : UINT64_MAX;
+            gravity::io_probe_result probe;
+            if (model_bytes > budget) {
+                const size_t first = std::find(used.begin(), used.end(), true) - used.begin();
+                probe = gravity::probe_io(model.gravity_files[first]);
+            }
+            const auto choice = gravity::choose_io_mode(model_bytes, budget, probe);
+            mode   = choice.mode;
+            reason = choice.reason;
+        }
+
+        fds.assign(n_files, -1);
+        aligns.assign(n_files, 0);
+        size_t n_direct = 0;
+        for (size_t i = 0; i < n_files; ++i) {
+            if (!used[i]) {
+                continue;
+            }
+            const std::string & path = model.gravity_files[i];
+            if (mode == gravity::io_mode::direct) {
+                const gravity::direct_fd df = gravity::open_direct(path);
+                if (df.ok()) {
+                    fds[i]    = df.fd;
+                    aligns[i] = df.alignment;
+                    max_align = std::max(max_align, df.alignment);
+                    n_direct++;
+                    continue;
+                }
+                LLAMA_LOG_WARN("llama_moe_cache: gravity stream: direct open of %s failed (%s), using the page cache\n", path.c_str(), df.error.c_str());
+            }
+            fds[i] = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fds[i] < 0) {
+                return "failed to open " + path + ": " + strerror(errno);
+            }
+        }
+
+        for (const ggml_tensor * w : experts) {
+            const auto it = model.gravity_exps_offs.find(ggml_get_name(w));
+            if (it == model.gravity_exps_offs.end() || it->second.first >= n_files || fds[it->second.first] < 0 || !ggml_is_contiguous(w)) {
+                continue;
+            }
+            const auto [file, offs] = it->second;
+            if (offs + ggml_nbytes(w) > sizes[file]) {
+                continue; // the host experts stay the source
+            }
+            sources[w] = { (int32_t) file, (uint64_t) offs };
+        }
+        if (sources.empty()) {
+            return "no host expert tensor matches its model file";
+        }
+
+        // max_staging holds at least one piece of the max size plus the rounding of a direct read
+        staging = gravity::aligned_buffer(max_staging, std::max<size_t>(max_align, 64));
+        if (!staging.ok()) {
+            return "failed to allocate the staging buffer";
+        }
+        pool = std::make_unique<gravity::read_pool>(n_threads);
+
+        LLAMA_LOG_INFO("llama_moe_cache: gravity stream: %zu of %zu expert tensors read from %.2f MiB of model files, %zu direct fds, %d threads (%s)\n",
+            sources.size(), experts.size(), model_bytes/1024.0/1024.0, n_direct, n_threads, reason.c_str());
+        return "";
+#endif
+    }
+
+    // upload the fills of one layer, returns the bytes uploaded
+    template <typename F>
+    size_t upload(const std::vector<ggml_tensor *> & experts, const std::vector<ggml_tensor *> & banks, const std::vector<F> & fills) {
+        const size_t max_piece = max_staging - 2*max_align;
+        size_t bytes = 0;
+        pieces.clear();
+        for (size_t ip = 0; ip < experts.size(); ++ip) {
+            const ggml_tensor * w    = experts[ip];
+            ggml_tensor       * bank = banks[ip];
+            const size_t expert_size = w->nb[2];
+            const auto it = sources.find(w);
+            for (size_t i = 0; i < fills.size();) {
+                size_t n = 1;
+                while (i + n < fills.size() && fills[i + n].expert == fills[i].expert + (int32_t) n && fills[i + n].slot == fills[i].slot + (int32_t) n) {
+                    n++;
+                }
+                const size_t src = fills[i].expert*expert_size;
+                const size_t dst = fills[i].slot*expert_size;
+                const size_t len = n*expert_size;
+                bytes += len;
+                i += n;
+                if (it == sources.end()) {
+                    ggml_backend_tensor_set(bank, (const uint8_t *) w->data + src, dst, len);
+                    continue;
+                }
+                for (size_t done = 0; done < len; done += max_piece) {
+                    piece p = {};
+                    p.w    = w;
+                    p.bank = bank;
+                    p.src  = src + done;
+                    p.dst  = dst + done;
+                    p.len  = std::min(max_piece, len - done);
+                    p.file = it->second.file;
+                    p.off  = it->second.offs + p.src;
+                    pieces.push_back(p);
+                }
+            }
+        }
+
+        // all reads of a batch are in flight together, then the batch is uploaded
+        // ponytail: blocking upload, the staging buffer is reused by the next batch; async double buffer if prefetch (P4) needs it
+        for (size_t i = 0; i < pieces.size();) {
+            const auto t0 = std::chrono::steady_clock::now();
+            size_t used = 0;
+            size_t j = i;
+            for (; j < pieces.size(); ++j) {
+                piece & p = pieces[j];
+                const size_t a = std::max<size_t>(aligns[p.file], 1);
+                p.rd_off = p.off / a * a;
+                p.rd_len = (size_t) ((p.off + p.len + a - 1) / a * a - p.rd_off);
+                p.pos    = (used + staging.alignment() - 1) / staging.alignment() * staging.alignment();
+                if (j > i && p.pos + p.rd_len > staging.size()) {
+                    break;
+                }
+                GGML_ASSERT(p.pos + p.rd_len <= staging.size());
+                used = p.pos + p.rd_len;
+
+                gravity::read_req req;
+                req.fd            = fds[p.file];
+                req.offset        = p.rd_off;
+                req.len           = p.rd_len;
+                req.dst           = (uint8_t *) staging.data() + p.pos;
+                req.tag           = j;
+                req.alignment     = aligns[p.file];
+                req.allow_partial = aligns[p.file] > 0; // the rounded range can end past EOF
+                const gravity::submit_result sub = pool->submit(req);
+                p.id = sub.id;
+                p.ok = false;
+                if (!sub.ok()) {
+                    warn(sub.error);
+                }
+            }
+            for (size_t k = i; k < j; ++k) {
+                piece & p = pieces[k];
+                if (p.id == 0) {
+                    continue;
+                }
+                const gravity::read_completion c = pool->wait(p.id);
+                bytes_read += c.bytes;
+                p.ok = c.status == gravity::read_status::ok && c.bytes >= (size_t) (p.off - p.rd_off) + p.len;
+                if (!p.ok) {
+                    warn(c.error.empty() ? "short read" : c.error);
+                }
+            }
+            read_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            for (size_t k = i; k < j; ++k) {
+                const piece & p = pieces[k];
+                if (p.ok) {
+                    ggml_backend_tensor_set(p.bank, (const uint8_t *) staging.data() + p.pos + (p.off - p.rd_off), p.dst, p.len);
+                } else {
+                    // same bytes from the host experts
+                    ggml_backend_tensor_set(p.bank, (const uint8_t *) p.w->data + p.src, p.dst, p.len);
+                    n_fallback++;
+                    bytes_fallback += p.len;
+                }
+            }
+            i = j;
+        }
+        return bytes;
+    }
+
+    void warn(const std::string & err) {
+        if (!warned) {
+            warned = true;
+            LLAMA_LOG_WARN("llama_moe_cache: gravity stream: read failed (%s), the experts are uploaded from host memory, see the fallbacks at exit\n", err.c_str());
+        }
+    }
+
+    void log_stats() const {
+        LLAMA_LOG_INFO("llama_moe_cache: gravity stream: read = %.2f MiB from file in %.1f ms, fallbacks = %zu (%.2f MiB from host memory)\n",
+            bytes_read/1024.0/1024.0, read_ms, n_fallback, bytes_fallback/1024.0/1024.0);
+    }
+};
+
 }
 
 struct llama_moe_cache::impl {
@@ -390,6 +673,9 @@ struct llama_moe_cache::impl {
     // LLAMA_MOE_CACHE_TRACE: the selected experts of each slot lookup, for a simulator of the cache
     FILE * trace = nullptr;
 
+    // nullptr unless gravity stream is on and active
+    std::unique_ptr<moe_cache_stream> stream;
+
     // slot maps in host memory
     ggml_context_ptr ctx_host;
     ggml_backend_buffer_ptr buf_host;
@@ -398,7 +684,8 @@ struct llama_moe_cache::impl {
     // views used by copy_experts
     ggml_context_ptr ctx_views;
 
-    impl(const llama_model & model, bool no_alloc, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size, float cpu_share) :
+    impl(const llama_model & model, bool no_alloc, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size, float cpu_share,
+            bool stream_on, int32_t stream_threads) :
             n_expert_used(model.hparams.n_expert_used_max()), layers(model.layers.size()), cpu_share(std::clamp(cpu_share, 0.0f, 1.0f)) {
         for (size_t i = 0; i < backends.size(); ++i) {
             const auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backends[i]));
@@ -444,6 +731,9 @@ struct llama_moe_cache::impl {
         }
         if (groups.empty()) {
             LLAMA_LOG_WARN("%s: no layer has all of its experts in host memory, MoE cache is disabled\n", __func__);
+            if (stream_on) {
+                LLAMA_LOG_INFO("%s: gravity stream: no MoE cache active, ignored\n", __func__);
+            }
             return;
         }
 
@@ -630,6 +920,23 @@ struct llama_moe_cache::impl {
                     LLAMA_LOG_INFO("%s: %2zu layers, %s: %5d slots (%.1f%%, %.1f tokens worth)\n", __func__,
                         g.layers.size(), ggml_type_name(g.ref.back()->type), g.n_slots, 100.0*g.n_slots/(g.layers.size()*g.ref[0]->ne[2]),
                         (double) g.n_slots/(g.layers.size()*n_expert_used));
+                }
+            }
+        }
+
+        if (stream_on && !no_alloc) {
+            std::vector<const ggml_tensor *> experts;
+            for (const layer & l : layers) {
+                experts.insert(experts.end(), l.experts.begin(), l.experts.end());
+            }
+            if (experts.empty()) {
+                LLAMA_LOG_INFO("%s: gravity stream: no MoE cache active, ignored\n", __func__);
+            } else {
+                stream = std::make_unique<moe_cache_stream>();
+                const std::string err = stream->init(model, experts, stream_threads);
+                if (!err.empty()) {
+                    LLAMA_LOG_WARN("%s: gravity stream: %s, the misses are read from host memory\n", __func__, err.c_str());
+                    stream.reset();
                 }
             }
         }
@@ -828,18 +1135,22 @@ struct llama_moe_cache::impl {
 
         // upload the missing experts, consecutive experts going to consecutive slots are uploaded together
         size_t bytes = 0;
-        for (size_t ip = 0; ip < l.experts.size(); ++ip) {
-            const ggml_tensor * w    = l.experts[ip];
-            ggml_tensor       * bank = g.banks[ip];
-            const size_t expert_size = w->nb[2];
-            for (size_t i = 0; i < fills.size();) {
-                size_t n = 1;
-                while (i + n < fills.size() && fills[i + n].expert == fills[i].expert + (int32_t) n && fills[i + n].slot == fills[i].slot + (int32_t) n) {
-                    n++;
+        if (stream) {
+            bytes = stream->upload(l.experts, g.banks, fills);
+        } else {
+            for (size_t ip = 0; ip < l.experts.size(); ++ip) {
+                const ggml_tensor * w    = l.experts[ip];
+                ggml_tensor       * bank = g.banks[ip];
+                const size_t expert_size = w->nb[2];
+                for (size_t i = 0; i < fills.size();) {
+                    size_t n = 1;
+                    while (i + n < fills.size() && fills[i + n].expert == fills[i].expert + (int32_t) n && fills[i + n].slot == fills[i].slot + (int32_t) n) {
+                        n++;
+                    }
+                    ggml_backend_tensor_set_async(backend, bank, (const uint8_t *) w->data + fills[i].expert*expert_size, fills[i].slot*expert_size, n*expert_size);
+                    bytes += n*expert_size;
+                    i += n;
                 }
-                ggml_backend_tensor_set_async(backend, bank, (const uint8_t *) w->data + fills[i].expert*expert_size, fills[i].slot*expert_size, n*expert_size);
-                bytes += n*expert_size;
-                i += n;
             }
         }
 
@@ -869,11 +1180,15 @@ struct llama_moe_cache::impl {
         if (stats_copy.hits > 0) {
             LLAMA_LOG_INFO("llama_moe_cache: large batches: %zu experts copied from the cache, %.2f MiB\n", stats_copy.hits, stats_copy.bytes/1024.0/1024.0);
         }
+        if (stream) {
+            stream->log_stats();
+        }
     }
 };
 
-llama_moe_cache::llama_moe_cache(const llama_model & model, bool no_alloc, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size, float cpu_share) :
-    pimpl(new impl(model, no_alloc, backends, bufts, size, cpu_share)) {
+llama_moe_cache::llama_moe_cache(const llama_model & model, bool no_alloc, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size, float cpu_share,
+        bool stream, int32_t stream_threads) :
+    pimpl(new impl(model, no_alloc, backends, bufts, size, cpu_share, stream, stream_threads)) {
 }
 
 llama_moe_cache::~llama_moe_cache() = default;

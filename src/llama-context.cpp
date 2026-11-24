@@ -378,6 +378,8 @@ llama_context::llama_context(
     cparams.kv_unified     = params.kv_unified;
     cparams.moe_cache_size      = params.moe_cache_size;
     cparams.moe_cache_cpu_share = params.moe_cache_cpu_share;
+    cparams.gravity_stream         = params.gravity_stream;
+    cparams.gravity_stream_threads = params.gravity_stream_threads > 0 ? params.gravity_stream_threads : 4;
 
     // resolved after flash attention, see resolve_fused_ops()
     {
@@ -607,7 +609,17 @@ llama_context::llama_context(
         }
 
         if (cparams.moe_cache_size > 0) {
-            moe_cache = std::make_unique<llama_moe_cache>(model, model.no_alloc(), backend_ptrs, backend_buft, cparams.moe_cache_size, cparams.moe_cache_cpu_share);
+            float cpu_share = cparams.moe_cache_cpu_share;
+            if (cparams.gravity_stream && cpu_share > 0.0f) {
+                // CPU misses read the host experts, which would fault in the mmap pages that streaming avoids
+                LLAMA_LOG_WARN("%s: gravity stream: --moe-cache-cpu-share %.2f forced to 0\n", __func__, (double) cpu_share);
+                cpu_share = 0.0f;
+                cparams.moe_cache_cpu_share = 0.0f;
+            }
+            moe_cache = std::make_unique<llama_moe_cache>(model, model.no_alloc(), backend_ptrs, backend_buft, cparams.moe_cache_size, cpu_share,
+                cparams.gravity_stream, cparams.gravity_stream_threads);
+        } else if (cparams.gravity_stream) {
+            LLAMA_LOG_INFO("%s: gravity stream: no MoE cache active, ignored\n", __func__);
         }
 
         sched_reserve();
@@ -4452,6 +4464,8 @@ llama_context_params llama_context_default_params() {
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
+        /*.gravity_stream              =*/ false,
+        /*.gravity_stream_threads      =*/ 4,
     };
 
     return result;

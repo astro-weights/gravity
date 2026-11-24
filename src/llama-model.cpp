@@ -2168,6 +2168,14 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     load_tensors_hadamard();
 
+    // file source of the expert tensors, so the MoE cache can read its misses from the file (gravity stream)
+    gravity_files = ml.file_paths;
+    for (const auto & [name, w] : ml.weights_map) {
+        if (name.find("_exps") != std::string::npos) {
+            gravity_exps_offs[name] = { w.idx, w.offs };
+        }
+    }
+
     return true;
 }
 

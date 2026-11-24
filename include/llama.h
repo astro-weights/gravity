@@ -426,6 +426,10 @@ extern "C" {
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;
+
+        // gravity: the MoE cache reads its misses from the model file instead of the host experts, needs moe_cache_size > 0 [EXPERIMENTAL]
+        bool    gravity_stream;
+        int32_t gravity_stream_threads; // read threads, <= 0 = 4
     };
 
     struct llama_model_tensor_override {

@@ -9,6 +9,7 @@
 #include "../src/llama-ext.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cmath>
 #include <cstddef>
@@ -1192,6 +1193,70 @@ static std::string get_device_label(ggml_backend_dev_t dev) {
     return std::string(desc) + " (" + name + ")";
 }
 
+// gravity stream: set by the log callback of test_backends
+static std::atomic<bool> g_stream_active   = false;
+static std::atomic<bool> g_stream_fallback = false;
+
+// gravity stream: the MoE cache reads its misses from the model file, the logits must be bit-identical to logits_ref
+// io: LLAMA_GRAVITY_STREAM_IO; truncate: cut the file once the context exists, so the reads past the cut fail and fall back to host memory
+static std::string check_gravity_stream(
+        const std::string & path, const std::vector<llama_token> & tokens, const std::vector<float> & logits_ref,
+        const std::vector<ggml_backend_dev_t> & devs, const llama_model_tensor_buft_override * tensor_buft_overrides,
+        const size_t moe_cache_size, const bool encode, const char * io, const bool truncate) {
+#ifdef _WIN32
+    GGML_UNUSED(path); GGML_UNUSED(tokens); GGML_UNUSED(logits_ref); GGML_UNUSED(devs); GGML_UNUSED(tensor_buft_overrides);
+    GGML_UNUSED(moe_cache_size); GGML_UNUSED(encode); GGML_UNUSED(io); GGML_UNUSED(truncate);
+    return "";
+#else
+    llama_model_params model_params = llama_model_default_params();
+    model_params.progress_callback = silent_model_load_progress;
+    std::vector<ggml_backend_dev_t> devs_copy = devs;
+    devs_copy.push_back(nullptr);
+    model_params.devices = devs_copy.data();
+    model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+    model_params.tensor_buft_overrides = tensor_buft_overrides;
+    // without mmap, the host experts do not read the truncated file
+    model_params.load_mode = truncate ? LLAMA_LOAD_MODE_NONE : LLAMA_LOAD_MODE_MMAP;
+    llama_model_ptr model(llama_model_load_from_file(path.c_str(), model_params));
+    if (!model) {
+        return "load failed";
+    }
+
+    llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.n_ctx = 0;
+    ctx_params.n_threads = 4;
+    ctx_params.n_threads_batch = 4;
+    ctx_params.moe_cache_size = moe_cache_size;
+    ctx_params.n_ubatch = 2;
+    ctx_params.gravity_stream = true;
+    ctx_params.gravity_stream_threads = 2;
+
+    setenv("LLAMA_GRAVITY_STREAM_IO", io, 1);
+    g_stream_active   = false;
+    g_stream_fallback = false;
+    llama_context_ptr lctx(llama_init_from_model(model.get(), ctx_params));
+    unsetenv("LLAMA_GRAVITY_STREAM_IO");
+    if (!lctx) {
+        return "context failed";
+    }
+    if (!g_stream_active) {
+        return "stream not active";
+    }
+    if (truncate) {
+        std::filesystem::resize_file(path, std::filesystem::file_size(path)/2);
+    }
+
+    const std::vector<float> logits = get_logits(model.get(), lctx.get(), tokens, encode);
+    if (logits.size() != logits_ref.size() || memcmp(logits.data(), logits_ref.data(), logits.size()*sizeof(float)) != 0) {
+        return "logits differ";
+    }
+    if (truncate && !g_stream_fallback) {
+        return "no fallback";
+    }
+    return "";
+#endif
+}
+
 static int test_backends(const std::string & arch_filter, const size_t seed, const float stdev, const int verbosity, const char * target_backend) {
     struct user_data_t {
         struct {
@@ -1209,6 +1274,10 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
 
     llama_log_set([](ggml_log_level level, const char * text, void * user_data) {
         const user_data_t * ud = (const user_data_t *) user_data;
+        if (strstr(text, "gravity stream: ") != nullptr) {
+            g_stream_active   = g_stream_active   || strstr(text, "expert tensors read from") != nullptr;
+            g_stream_fallback = g_stream_fallback || strstr(text, "read failed") != nullptr;
+        }
         int verbosity = common_log_get_verbosity(level);
         if (verbosity <= ud->verbosity) {
             ud->log_old.callback(level, text, ud->log_old.user_data);
@@ -1432,6 +1501,19 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
                                     test_ok = false;
                                     status_roundtrip = "\033[1;31mFAIL\033[0m";
                                     break;
+                                }
+                            }
+                        }
+
+                        // gravity stream: page cache reads, direct reads, and reads that fail and fall back (last, it truncates the file)
+                        if (dc.moe_cache_size > 0) {
+                            const std::pair<const char *, bool> cases[] = { { "page", false }, { "direct", false }, { "page", true } };
+                            for (const auto & [io, truncate] : cases) {
+                                const std::string err = check_gravity_stream(path, tokens, logits_dev, dc.devs, overrides, dc.moe_cache_size, encode, io, truncate);
+                                if (!err.empty()) {
+                                    LOG_ERR("%s: gravity stream (%s%s): %s\n", llama_arch_name(arch), io, truncate ? ", truncated" : "", err.c_str());
+                                    test_ok = false;
+                                    status_roundtrip = "\033[1;31mFAIL\033[0m";
                                 }
                             }
                         }

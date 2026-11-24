@@ -2759,6 +2759,23 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_MOE_CACHE_CPU_SHARE"));
     add_opt(common_arg(
+        {"--gravity-stream"},
+        "read MoE cache misses from the model file (gravity streaming); needs --moe-cache-mib",
+        [](common_params & params) {
+            params.gravity_stream = true;
+        }
+    ).set_env("LLAMA_ARG_GRAVITY_STREAM"));
+    add_opt(common_arg(
+        {"--gravity-stream-threads"}, "N",
+        string_format("read threads for --gravity-stream (default: %d)", params.gravity_stream_threads),
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.gravity_stream_threads = value;
+        }
+    ).set_env("LLAMA_ARG_GRAVITY_STREAM_THREADS"));
+    add_opt(common_arg(
         {"-ncffn", "--n-cpu-ffn"}, "N",
         "keep the dense FFN weights of the first N layers in the CPU\n"
         "(dense models; for MoE expert weights use --n-cpu-moe)",
