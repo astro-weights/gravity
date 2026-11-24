@@ -441,3 +441,8 @@ if (TARGET gguf-model-data)
     target_link_libraries(test-export-graph-ops PRIVATE gguf-model-data)
     target_compile_definitions(test-export-graph-ops PRIVATE LLAMA_HF_FETCH)
 endif()
+
+# gravity streaming groundwork (src/gravity)
+llama_build_and_test(test-gravity-mem-budget.cpp LINK gravity-stream)
+llama_build_and_test(test-gravity-io.cpp         LINK gravity-stream)
+llama_build_and_test(test-gravity-swap.cpp       LINK gravity-stream)
