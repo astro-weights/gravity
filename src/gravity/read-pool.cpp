@@ -106,7 +106,21 @@ std::string validate_read_req(const read_req & req) {
     return "";
 }
 
+#ifndef _WIN32
+static int64_t os_pread(int fd, void * dst, size_t len, uint64_t offset) {
+    return (int64_t) pread(fd, dst, len, (off_t) offset);
+}
+#endif
+
 read_completion read_full(const read_req & req) {
+#ifdef _WIN32
+    return read_full_with(req, nullptr);
+#else
+    return read_full_with(req, os_pread);
+#endif
+}
+
+read_completion read_full_with(const read_req & req, pread_fn pr) {
     read_completion c;
     c.tag = req.tag;
 
@@ -116,10 +130,10 @@ read_completion read_full(const read_req & req) {
         return c;
     }
 
-#ifdef _WIN32
-    c.error = "pread not supported on this platform";
-    return c;
-#else
+    if (pr == nullptr) {
+        c.error = "pread not supported on this platform";
+        return c;
+    }
     char * dst = (char *) req.dst;
     size_t got = 0;
     while (got < req.len) {
@@ -127,8 +141,8 @@ read_completion read_full(const read_req & req) {
         if (req.alignment != 0 && got % req.alignment != 0) {
             break;
         }
-        const size_t  want = std::min(req.len - got, (size_t) std::numeric_limits<ssize_t>::max());
-        const ssize_t r    = pread(req.fd, dst + got, want, (off_t) (req.offset + got));
+        const size_t  want = std::min(req.len - got, (size_t) std::numeric_limits<int64_t>::max());
+        const int64_t r    = pr(req.fd, dst + got, want, req.offset + got);
         if (r < 0) {
             if (errno == EINTR) {
                 continue;
@@ -150,14 +164,22 @@ read_completion read_full(const read_req & req) {
     }
     c.status = read_status::ok;
     return c;
-#endif
 }
 
-read_pool::read_pool(int n_threads, read_fn read) : fn(read ? std::move(read) : read_fn(read_full)) {
+read_pool::read_pool(int n_threads, read_fn read) {
+    try {
+        st     = std::make_shared<state>();
+        st->fn = read ? std::move(read) : read_fn(read_full);
+    } catch (...) {
+        st.reset();
+        return;
+    }
     n_threads = std::max(1, n_threads);
+    std::lock_guard<std::mutex> lock(st->mtx);
     for (int i = 0; i < n_threads; ++i) {
         try {
-            workers.emplace_back([this] { worker(); });
+            std::shared_ptr<state> s = st;
+            st->workers.emplace_back([s] { worker(s); });
         } catch (...) {
             break; // keep the threads we got; submit fails if none
         }
@@ -168,28 +190,51 @@ read_pool::~read_pool() {
     shutdown();
 }
 
+size_t read_pool::n_threads() const {
+    if (!st) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(st->mtx);
+    return st->workers.size();
+}
+
 submit_result read_pool::submit(const read_req & req) {
     submit_result res;
-    res.error = validate_read_req(req);
-    if (!res.error.empty()) {
-        return res;
+    try {
+        res.error = validate_read_req(req);
+        if (!res.error.empty()) {
+            return res;
+        }
+        if (!st) {
+            res.error = "read pool not initialized";
+            return res;
+        }
+        std::lock_guard<std::mutex> lock(st->mtx);
+        if (st->stopping || st->workers.empty()) {
+            res.error = "read pool shut down";
+            return res;
+        }
+        const read_id id = st->next_id;
+        slot          sl;
+        sl.req = req;
+        st->slots.emplace(id, std::move(sl));
+        try {
+            st->queue.push_back(id);
+        } catch (...) {
+            st->slots.erase(id);
+            throw;
+        }
+        st->next_id++;
+        res.id = id;
+        st->work_cv.notify_one();
+    } catch (...) {
+        res.id    = 0;
+        res.error = "submit failed: out of memory";
     }
-    std::lock_guard<std::mutex> lock(mtx);
-    if (stopping || workers.empty()) {
-        res.error = "read pool shut down";
-        return res;
-    }
-    const read_id id = next_id++;
-    slot          s;
-    s.req = req;
-    slots.emplace(id, std::move(s));
-    queue.push_back(id);
-    res.id = id;
-    work_cv.notify_one();
     return res;
 }
 
-bool read_pool::take_done(read_id id, read_completion & out) {
+bool read_pool::state::take_done(read_id id, read_completion & out) {
     auto it = slots.find(id);
     if (it == slots.end()) {
         out       = read_completion();
@@ -205,78 +250,97 @@ bool read_pool::take_done(read_id id, read_completion & out) {
 }
 
 read_completion read_pool::wait(read_id id) {
-    std::unique_lock<std::mutex> lock(mtx);
-    read_completion              out;
-    done_cv.wait(lock, [&] { return take_done(id, out); });
+    read_completion out;
+    if (!st) {
+        out.error = "read pool not initialized";
+        return out;
+    }
+    std::unique_lock<std::mutex> lock(st->mtx);
+    st->done_cv.wait(lock, [&] { return st->take_done(id, out); });
     return out;
 }
 
 bool read_pool::poll(read_id id, read_completion & out) {
-    std::lock_guard<std::mutex> lock(mtx);
-    return take_done(id, out);
+    if (!st) {
+        out       = read_completion();
+        out.error = "read pool not initialized";
+        return true;
+    }
+    std::lock_guard<std::mutex> lock(st->mtx);
+    return st->take_done(id, out);
 }
 
 bool read_pool::cancel(read_id id) {
-    std::lock_guard<std::mutex> lock(mtx);
-    auto                        it = slots.find(id);
-    if (it == slots.end() || it->second.started || it->second.done) {
+    if (!st) {
         return false;
     }
-    queue.erase(std::remove(queue.begin(), queue.end(), id), queue.end());
-    it->second.done        = true;
-    it->second.comp        = read_completion();
-    it->second.comp.tag    = it->second.req.tag;
-    it->second.comp.status = read_status::cancelled;
-    it->second.comp.error  = "cancelled";
-    done_cv.notify_all();
+    std::lock_guard<std::mutex> lock(st->mtx);
+    auto                        it = st->slots.find(id);
+    if (it == st->slots.end() || it->second.started || it->second.done) {
+        return false;
+    }
+    st->queue.erase(std::remove(st->queue.begin(), st->queue.end(), id), st->queue.end());
+    slot & sl       = it->second;
+    sl.done         = true;
+    sl.comp         = read_completion();
+    sl.comp.tag     = sl.req.tag;
+    sl.comp.status  = read_status::cancelled;
+    sl.comp.error   = "cancelled";
+    st->done_cv.notify_all();
     return true;
 }
 
 void read_pool::shutdown() {
+    if (!st) {
+        return;
+    }
     std::vector<std::thread> to_join;
     {
-        std::lock_guard<std::mutex> lock(mtx);
-        stopping = true;
-        for (read_id id : queue) {
-            slot & s       = slots[id];
-            s.done         = true;
-            s.comp         = read_completion();
-            s.comp.tag     = s.req.tag;
-            s.comp.status  = read_status::cancelled;
-            s.comp.error   = "cancelled: pool shut down";
+        std::lock_guard<std::mutex> lock(st->mtx);
+        st->stopping = true;
+        for (read_id id : st->queue) {
+            slot & sl      = st->slots[id];
+            sl.done        = true;
+            sl.comp        = read_completion();
+            sl.comp.tag    = sl.req.tag;
+            sl.comp.status = read_status::cancelled;
+            sl.comp.error  = "cancelled: pool shut down";
         }
-        queue.clear();
-        to_join.swap(workers);
-        work_cv.notify_all();
-        done_cv.notify_all();
+        st->queue.clear();
+        to_join.swap(st->workers);
+        st->work_cv.notify_all();
+        st->done_cv.notify_all();
     }
+    const std::thread::id self = std::this_thread::get_id();
     for (auto & t : to_join) {
-        if (t.joinable()) {
+        if (t.get_id() == self) {
+            t.detach(); // called from inside read_fn: joining self would throw; state stays alive via shared_ptr
+        } else if (t.joinable()) {
             t.join();
         }
     }
 }
 
-void read_pool::worker() {
-    std::unique_lock<std::mutex> lock(mtx);
+void read_pool::worker(const std::shared_ptr<state> & st) {
+    std::unique_lock<std::mutex> lock(st->mtx);
     for (;;) {
-        work_cv.wait(lock, [this] { return stopping || !queue.empty(); });
-        if (queue.empty()) {
+        st->work_cv.wait(lock, [&] { return st->stopping || !st->queue.empty(); });
+        if (st->queue.empty()) {
             return; // stopping
         }
-        const read_id id = queue.front();
-        queue.pop_front();
-        auto it = slots.find(id);
-        if (it == slots.end()) {
+        const read_id id = st->queue.front();
+        st->queue.pop_front();
+        auto it = st->slots.find(id);
+        if (it == st->slots.end()) {
             continue;
         }
-        it->second.started  = true;
-        const read_req req  = it->second.req;
+        it->second.started = true;
+        const read_req req = it->second.req;
         lock.unlock();
 
         read_completion c;
         try {
-            c = fn(req);
+            c = st->fn(req);
         } catch (...) {
             c       = read_completion();
             c.error = "read function threw";
@@ -285,10 +349,12 @@ void read_pool::worker() {
 
         lock.lock();
         // slot may not be erased while started and not done: wait/poll only erase done slots
-        slot & s = slots[id];
-        s.comp   = std::move(c);
-        s.done   = true;
-        done_cv.notify_all();
+        auto jt = st->slots.find(id);
+        if (jt != st->slots.end()) {
+            jt->second.comp = std::move(c);
+            jt->second.done = true;
+        }
+        st->done_cv.notify_all();
     }
 }
 

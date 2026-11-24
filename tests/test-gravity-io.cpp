@@ -102,6 +102,86 @@ static void test_aligned_buffer() {
     CHECK(zero.ok() && zero.size() == 4096);
 }
 
+
+// fake pread over a fixed buffer: EINTR on the first call, then 1 byte per call
+static std::vector<uint8_t> fake_src;
+static int                  fake_calls  = 0;
+static int                  fake_eintr  = 0;
+static int                  fake_eio_at = -1; // call index that fails with EIO
+
+static int64_t fake_pread(int, void * dst, size_t len, uint64_t off) {
+    const int call = fake_calls++;
+    if (call == 0) {
+        ++fake_eintr;
+        errno = EINTR;
+        return -1;
+    }
+    if (call == fake_eio_at) {
+        errno = EIO;
+        return -1;
+    }
+    if (off >= fake_src.size() || len == 0) {
+        return 0;
+    }
+    memcpy(dst, fake_src.data() + off, 1);
+    return 1;
+}
+
+static void test_read_full_fake() {
+    fake_src.resize(300);
+    for (size_t i = 0; i < fake_src.size(); ++i) {
+        fake_src[i] = (uint8_t) (i * 7 + 1);
+    }
+    uint8_t  buf[512] = {};
+    read_req r;
+    r.fd     = 3;
+    r.offset = 10;
+    r.len    = 200;
+    r.dst    = buf;
+    r.tag    = 5;
+
+    fake_calls = fake_eintr = 0;
+    fake_eio_at             = -1;
+    read_completion c       = read_full_with(r, fake_pread);
+    CHECK(c.status == read_status::ok && c.bytes == 200 && c.tag == 5);
+    CHECK(fake_eintr == 1 && fake_calls == 201);
+    CHECK(memcmp(buf, fake_src.data() + 10, 200) == 0);
+
+    // short reads up to EOF: error without allow_partial, ok with it
+    r.offset   = 250;
+    r.len      = 100;
+    fake_calls = 0;
+    c          = read_full_with(r, fake_pread);
+    CHECK(c.status == read_status::error && c.bytes == 50 && c.err == 0);
+    r.allow_partial = true;
+    fake_calls      = 0;
+    c               = read_full_with(r, fake_pread);
+    CHECK(c.status == read_status::ok && c.bytes == 50);
+
+    // hard error partway keeps the byte count and errno
+    r.offset        = 0;
+    r.len           = 100;
+    r.allow_partial = false;
+    fake_calls      = 0;
+    fake_eio_at     = 11;
+    c               = read_full_with(r, fake_pread);
+    CHECK(c.status == read_status::error && c.err == EIO && c.bytes == 10);
+    fake_eio_at = -1;
+
+    // direct fd: stop after an unaligned short count instead of issuing an unaligned pread
+    aligned_buffer ab(1024, 512);
+    read_req       d;
+    d.fd        = 3;
+    d.len       = 512;
+    d.dst       = ab.data();
+    d.alignment = 512;
+    fake_calls  = 0;
+    c           = read_full_with(d, fake_pread);
+    CHECK(c.status == read_status::error && c.bytes == 1 && fake_calls == 2);
+
+    CHECK(read_full_with(r, nullptr).status == read_status::error);
+}
+
 #ifndef _WIN32
 
 struct temp_file {
@@ -460,6 +540,66 @@ static void test_pool_cancel_shutdown() {
     close(fd);
 }
 
+
+static void test_pool_shutdown_from_worker() {
+    temp_file f(4096, 9);
+    int       fd = open(f.path.c_str(), O_RDONLY);
+    CHECK(fd >= 0);
+    char d1[64];
+    char d2[64];
+
+    {
+        // shutdown() called inside read_fn must not self-join
+        std::atomic<read_pool *> self{ nullptr };
+        read_pool                pool(2, [&](const read_req & r) {
+            if (r.tag == 1) {
+                self.load()->shutdown();
+            }
+            return read_full(r);
+        });
+        self.store(&pool);
+        read_req q;
+        q.fd               = fd;
+        q.len              = 64;
+        q.dst              = d1;
+        q.tag              = 1;
+        read_completion c  = pool.wait(pool.submit(q).id);
+        CHECK(c.status == read_status::ok && c.bytes == 64);
+        CHECK(!pool.submit(q).ok());
+        CHECK(pool.n_threads() == 0);
+    }
+
+    {
+        // destructor called inside read_fn: detached worker finishes on the shared state
+        std::mutex              m;
+        std::condition_variable cv;
+        bool                    deleted = false;
+        read_pool *             pool    = nullptr;
+        pool                            = new read_pool(2, [&](const read_req & r) {
+            read_completion c = read_full(r); // before delete: test locals may go away after notify
+            if (r.tag == 2) {
+                delete pool;
+                std::lock_guard<std::mutex> lock(m);
+                deleted = true;
+                cv.notify_all();
+            }
+            return c;
+        });
+        read_req q;
+        q.fd  = fd;
+        q.len = 64;
+        q.dst = d2;
+        q.tag = 2;
+        CHECK(pool->submit(q).ok());
+        std::unique_lock<std::mutex> lock(m);
+        CHECK(cv.wait_for(lock, std::chrono::seconds(10), [&] { return deleted; }));
+        lock.unlock();
+        // let the detached worker store its result and exit
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    close(fd);
+}
+
 static void test_direct_reads() {
     const size_t size = (1u << 20) + 1000; // tail not a multiple of the alignment
     temp_file    f(size, 8);
@@ -499,10 +639,12 @@ int main() {
     test_rule();
     test_aligned_buffer();
 #ifndef _WIN32
+    test_read_full_fake();
     test_probe();
     test_pool_random_reads();
     test_pool_errors();
     test_pool_cancel_shutdown();
+    test_pool_shutdown_from_worker();
     test_direct_reads();
 #endif
     if (n_fail) {

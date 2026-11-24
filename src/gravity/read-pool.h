@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -73,24 +74,30 @@ struct submit_result {
     bool ok() const { return id != 0; }
 };
 
+// pread-like: bytes read, 0 at EOF, or -1 with errno set. Tests inject a fake.
+using pread_fn = int64_t (*)(int fd, void * dst, size_t len, uint64_t offset);
+
 // One blocking read with the same rules as the pool workers: retries EINTR and short reads.
 read_completion read_full(const read_req & req);
+read_completion read_full_with(const read_req & req, pread_fn pr);
 
 // Empty string if req is valid.
 std::string validate_read_req(const read_req & req);
 
 using read_fn = std::function<read_completion(const read_req &)>;
 
+// Every id returned by submit, cancelled ones too, must be collected with wait() or poll(); else its completion stays in memory.
+// Calling shutdown() or the destructor from inside a read_fn is allowed: that worker thread is detached, not joined.
 class read_pool {
   public:
-    // fn is the OS read; tests inject a fake. Default read_full.
+    // read is the OS read; tests inject a fake. Default read_full.
     explicit read_pool(int n_threads, read_fn read = read_full);
     ~read_pool(); // shutdown()
 
     read_pool(const read_pool &)             = delete;
     read_pool & operator=(const read_pool &) = delete;
 
-    // Thread safe. Bad request or pool shut down -> id 0 and error text.
+    // Thread safe. Bad request, pool shut down or out of memory -> id 0 and error text.
     submit_result submit(const read_req & req);
 
     // Block until done, then forget the id. Unknown or already collected id -> error completion.
@@ -103,9 +110,10 @@ class read_pool {
     bool cancel(read_id id);
 
     // Queued requests complete as cancelled, running ones finish, threads join. Idempotent.
+    // Only the first caller waits for running reads; a concurrent second call can return before they finish.
     void shutdown();
 
-    size_t n_threads() const { return workers.size(); }
+    size_t n_threads() const;
 
   private:
     struct slot {
@@ -115,18 +123,24 @@ class read_pool {
         read_completion comp;
     };
 
-    void worker();
-    bool take_done(read_id id, read_completion & out); // lock held
+    // shared with the workers, so a worker that outlives the pool object (destroyed from inside read_fn) stays valid
+    struct state {
+        read_fn                           fn;
+        std::mutex                        mtx;
+        std::condition_variable           work_cv;
+        std::condition_variable           done_cv;
+        std::deque<read_id>               queue;
+        std::unordered_map<read_id, slot> slots;
+        std::vector<std::thread>          workers;
+        read_id                           next_id  = 1;
+        bool                              stopping = false;
 
-    read_fn                           fn;
-    std::mutex                        mtx;
-    std::condition_variable           work_cv;
-    std::condition_variable           done_cv;
-    std::deque<read_id>               queue;
-    std::unordered_map<read_id, slot> slots;
-    std::vector<std::thread>          workers;
-    read_id                           next_id  = 1;
-    bool                              stopping = false;
+        bool take_done(read_id id, read_completion & out); // lock held
+    };
+
+    static void worker(const std::shared_ptr<state> & st);
+
+    std::shared_ptr<state> st;
 };
 
 } // namespace gravity
