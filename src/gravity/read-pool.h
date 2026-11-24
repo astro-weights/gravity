@@ -43,6 +43,7 @@ using read_id = uint64_t; // 0 = invalid
 
 // Queued demand reads start before queued prefetch reads (FIFO within each class). Running reads are never preempted.
 // Priority only changes timing, never which bytes land in dst.
+// Prefetch can starve under continuous demand; bounded by scheduler max_prefetch_inflight + drop_prefetch.
 enum class read_priority {
     demand,
     prefetch,

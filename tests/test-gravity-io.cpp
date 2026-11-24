@@ -501,12 +501,18 @@ static void test_pool_cancel_shutdown() {
         for (int i = 0; i < 20; ++i) {
             pend.push_back(pool.submit(q).id);
         }
-        std::thread opener([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // open the gate only once shutdown has cancelled the queue; poll consumes the id, so keep its completion
+        read_completion last;
+        std::thread     opener([&] {
+            while (!pool.poll(pend.back(), last)) {
+                std::this_thread::yield();
+            }
             g.open();
         });
         pool.shutdown();
         opener.join();
+        CHECK(last.status == read_status::cancelled && last.tag == 9);
+        pend.pop_back();
         for (read_id id : pend) {
             read_completion c = pool.wait(id);
             CHECK(c.status == read_status::cancelled && c.tag == 9);
@@ -635,13 +641,16 @@ static void test_pool_priority() {
         og.g.wait_held(1);
         read_id p1 = pool.submit(mk(1, read_priority::prefetch)).id;
         read_id d1 = pool.submit(mk(10, read_priority::demand)).id;
-        std::thread opener([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // open the gate only once shutdown has cancelled the queues; poll consumes the id, so keep its completion
+        read_completion c;
+        std::thread     opener([&] {
+            while (!pool.poll(p1, c)) {
+                std::this_thread::yield();
+            }
             og.g.open();
         });
         pool.shutdown();
         opener.join();
-        read_completion c = pool.wait(p1);
         CHECK(c.status == read_status::cancelled && c.tag == 1);
         c = pool.wait(d1);
         CHECK(c.status == read_status::cancelled && c.tag == 10);
