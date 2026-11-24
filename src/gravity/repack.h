@@ -35,13 +35,15 @@ struct expert_index {
 // true for blk.N.ffn_{gate,up,down,gate_up}_exps.weight
 bool is_moe_expert_tensor(const std::string & name);
 
-// refuses in == out and non-MoE input. Writes out + ".tmp" then renames; tmp removed on failure
+// Run this LAST. llama-quantize and gguf-split copy general.alignment = 4096 and the index keys but
+// write 32-aligned tensors, so their output is unloadable or stale: quantize/split the original, then repack.
+// refuses in == out and non-MoE input. Writes out + ".tmp.<pid>" then renames; tmp removed on failure
 status repack_gguf(const std::string & in, const std::string & out);
 
 // dry run: fills name + stride + n_expert of the MoE tensors (offsets stay 0), same refusals as repack_gguf
 status plan_repack(const std::string & in, expert_index & idx);
 
-// reads the gravity.expert_index.* keys of a repacked file
+// reads the gravity.expert_index.* keys of a repacked file; fails when they do not match the tensors
 status read_expert_index(const std::string & path, expert_index & idx);
 
 } // namespace gravity

@@ -11,6 +11,12 @@
 #include <fstream>
 #include <memory>
 
+#ifdef _WIN32
+#    include <process.h>
+#else
+#    include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace gravity {
@@ -290,9 +296,15 @@ status repack_gguf(const std::string & in, const std::string & out) {
         (fs::exists(out, ec) && fs::equivalent(in, out, ec))) {
         return { "input and output are the same file" };
     }
-    const std::string tmp = out + ".tmp";
-    if (fs::exists(tmp, ec) && fs::equivalent(in, tmp, ec)) {
-        return { "input is the temporary output file" };
+    // unique name: never truncate or delete a file the user already has next to out
+#ifdef _WIN32
+    const long pid = (long) _getpid();
+#else
+    const long pid = (long) getpid();
+#endif
+    const std::string tmp = out + ".tmp." + std::to_string(pid);
+    if (fs::exists(tmp, ec)) {
+        return { "temporary output file already exists: " + tmp };
     }
 
     status st = repack_to(in, tmp);
@@ -353,8 +365,24 @@ status read_expert_index(const std::string & path, expert_index & idx) {
     const uint64_t * strides = (const uint64_t *) gguf_get_arr_data(ctx, id_strides);
     idx.version  = version;
     idx.n_expert = gguf_get_val_u32(ctx, id_n);
+    // llama-quantize and gguf-split copy these keys but move the tensors: trust nothing
+    const char * stale = "expert index is stale, re-run llama-gravity-repack on the final GGUF";
     for (size_t i = 0; i < n; i++) {
-        idx.tensors.push_back({ gguf_get_arr_str(ctx, id_names, i), offs[i], strides[i] });
+        const char *    name = gguf_get_arr_str(ctx, id_names, i);
+        const int64_t   tid  = gguf_find_tensor(ctx, name);
+        const ggml_tensor * t = ggml_get_tensor(g.data.get(), name);
+        if (tid < 0 || !t) {
+            return { std::string(stale) + " (tensor missing: " + name + ")" };
+        }
+        const uint64_t abs = gguf_get_data_offset(ctx) + gguf_get_tensor_offset(ctx, tid);
+        if (offs[i] != abs) {
+            return { std::string(stale) + " (offset mismatch: " + name + ")" };
+        }
+        if (ggml_n_dims(t) != 3 || (uint64_t) t->ne[2] != idx.n_expert ||
+            strides[i] * idx.n_expert != gguf_get_tensor_size(ctx, tid)) {
+            return { std::string(stale) + " (stride or n_expert mismatch: " + name + ")" };
+        }
+        idx.tensors.push_back({ name, offs[i], strides[i] });
     }
     return {};
 }

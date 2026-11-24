@@ -11,6 +11,9 @@ static void print_usage(const char * argv0) {
         "\n"
         "Rewrite a MoE GGUF with general.alignment = 4096 and gravity.expert_index.* keys.\n"
         "Tensors keep name, type, shape, bytes and order: stock llama.cpp still loads OUT.\n"
+        "Run it LAST: llama-quantize and gguf-split copy the 4096 alignment and index keys but\n"
+        "write 32-aligned tensors, so quantize or split the original file, then repack the result.\n"
+        "\n"
         "  --dry-run   print tensor, stride, 4096-aligned yes/no; write nothing\n"
         "\n"
         "Layout idea: Strata (Niko1221/Strata, MIT)\n",
