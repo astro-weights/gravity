@@ -137,14 +137,6 @@ From GR1, our noise-floor test. Model: Qwen3.5-9B Q4_K_M. Machine: Apple M3 Pro 
 
 In the same test, a fresh stock server with `--lora-init-without-apply` ran the adapter at scale 1.0 for a request without `lora` (5 of 5 prompts).
 
-## Roadmap
-
-Planned, NOT built:
-- Expert streaming: run MoE models larger than memory by streaming experts from disk.
-- LoRA on streamed experts.
-- macOS streaming (Linux first).
-- Packaging.
-
 ## Upstream base and rebase policy
 
 - Base: llama.cpp `v1.0.0`, commit `b1b770d90d94`.
