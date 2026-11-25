@@ -7,6 +7,7 @@ add_library(gravity-stream STATIC
     swap-policy.cpp
     slot-ring.cpp
     scheduler.cpp
+    residency.cpp
 )
 target_include_directories(gravity-stream PUBLIC .)
 target_compile_features(gravity-stream PUBLIC cxx_std_17)

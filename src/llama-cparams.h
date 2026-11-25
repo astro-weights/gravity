@@ -60,6 +60,7 @@ struct llama_cparams {
 
     bool    gravity_stream;
     int32_t gravity_stream_threads;
+    int32_t gravity_residency_mib; // 0 = off
 
     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
     bool embeddings_layer_inp_dev; // write enabled layer inputs to a device buffer instead of host

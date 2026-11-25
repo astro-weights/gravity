@@ -2776,6 +2776,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_GRAVITY_STREAM_THREADS"));
     add_opt(common_arg(
+        {"--gravity-residency-mib"}, "N",
+        "keep resident expert bytes of the model mmap under N MiB: cold expert pages are dropped after each decode, GPU faults them back from the file (gravity, full offload with mmap; default: 0 = off)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.gravity_residency_mib = value;
+        }
+    ).set_env("LLAMA_ARG_GRAVITY_RESIDENCY_MIB"));
+    add_opt(common_arg(
         {"-ncffn", "--n-cpu-ffn"}, "N",
         "keep the dense FFN weights of the first N layers in the CPU\n"
         "(dense models; for MoE expert weights use --n-cpu-moe)",
