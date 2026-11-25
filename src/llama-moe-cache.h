@@ -15,8 +15,9 @@ public:
     // backends are all the backends of the context, each GPU gets its own cache of the given size for the layers assigned to it
     // cpu_share is the share of the misses computed on the CPU instead of uploaded
     // stream: read the misses from the model file instead of the host experts (gravity streaming), with stream_threads read threads
+    // memory_bound: the user capped RAM, so the stream prefers direct IO even when it is not faster
     llama_moe_cache(const llama_model & model, bool no_alloc, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size, float cpu_share,
-            bool stream = false, int32_t stream_threads = 4);
+            bool stream = false, int32_t stream_threads = 4, bool memory_bound = false);
     ~llama_moe_cache();
 
     // the device that caches layer il

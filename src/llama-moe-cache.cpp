@@ -380,13 +380,14 @@ struct moe_cache_stream {
 
     // returns an empty string on success, else why the stream is off
     // max_fill_bytes, max_fill_pieces: the most bytes and runs one copy() can upload, they size the staging buffer
-    std::string init(const llama_model & model, const std::vector<const ggml_tensor *> & experts, int32_t n_threads, size_t max_fill_bytes, size_t max_fill_pieces) {
+    std::string init(const llama_model & model, const std::vector<const ggml_tensor *> & experts, int32_t n_threads, size_t max_fill_bytes, size_t max_fill_pieces, bool memory_bound) {
 #ifdef _WIN32
         GGML_UNUSED(model);
         GGML_UNUSED(experts);
         GGML_UNUSED(n_threads);
         GGML_UNUSED(max_fill_bytes);
         GGML_UNUSED(max_fill_pieces);
+        GGML_UNUSED(memory_bound);
         return "not supported on this platform";
 #else
         const size_t n_files = model.gravity_files.size();
@@ -429,7 +430,9 @@ struct moe_cache_stream {
                 const size_t first = std::find(used.begin(), used.end(), true) - used.begin();
                 probe = gravity::probe_io(model.gravity_files[first]);
             }
-            const auto choice = gravity::choose_io_mode(model_bytes, budget, probe);
+            gravity::io_mode_cfg cfg;
+            cfg.memory_bound = memory_bound;
+            const auto choice = gravity::choose_io_mode(model_bytes, budget, probe, cfg);
             mode   = choice.mode;
             reason = choice.reason;
         }
@@ -710,7 +713,7 @@ struct llama_moe_cache::impl {
     ggml_context_ptr ctx_views;
 
     impl(const llama_model & model, bool no_alloc, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size, float cpu_share,
-            bool stream_on, int32_t stream_threads) :
+            bool stream_on, int32_t stream_threads, bool memory_bound) :
             n_expert_used(model.hparams.n_expert_used_max()), layers(model.layers.size()), cpu_share(std::clamp(cpu_share, 0.0f, 1.0f)) {
         for (size_t i = 0; i < backends.size(); ++i) {
             const auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backends[i]));
@@ -970,7 +973,7 @@ struct llama_moe_cache::impl {
                     max_fill_bytes  = std::max(max_fill_bytes, n*expert_bytes);
                     max_fill_pieces = std::max(max_fill_pieces, n*g.ref.size());
                 }
-                const std::string err = stream->init(model, experts, stream_threads, max_fill_bytes, max_fill_pieces);
+                const std::string err = stream->init(model, experts, stream_threads, max_fill_bytes, max_fill_pieces, memory_bound);
                 if (!err.empty()) {
                     LLAMA_LOG_WARN("%s: gravity stream: %s, the misses are read from host memory\n", __func__, err.c_str());
                     stream.reset();
@@ -1229,8 +1232,8 @@ struct llama_moe_cache::impl {
 };
 
 llama_moe_cache::llama_moe_cache(const llama_model & model, bool no_alloc, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size, float cpu_share,
-        bool stream, int32_t stream_threads) :
-    pimpl(new impl(model, no_alloc, backends, bufts, size, cpu_share, stream, stream_threads)) {
+        bool stream, int32_t stream_threads, bool memory_bound) :
+    pimpl(new impl(model, no_alloc, backends, bufts, size, cpu_share, stream, stream_threads, memory_bound)) {
 }
 
 llama_moe_cache::~llama_moe_cache() = default;

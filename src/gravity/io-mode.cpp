@@ -44,12 +44,17 @@ io_mode_choice choose_io_mode(uint64_t                model_bytes,
         res.reason = "direct " + fmt_gbps(probe.direct_gbps) + " GB/s below " + fmt_gbps(cfg.min_direct_gbps) + " GB/s";
         return res;
     }
-    if (probe.direct_gbps < cfg.min_speedup * probe.cached_gbps) {
+    if (!cfg.memory_bound && probe.direct_gbps < cfg.min_speedup * probe.cached_gbps) {
         res.reason = "direct " + fmt_gbps(probe.direct_gbps) + " GB/s not " + fmt_gbps(cfg.min_speedup) +
                      "x cached " + fmt_gbps(probe.cached_gbps) + " GB/s";
         return res;
     }
-    res.mode   = io_mode::direct;
+    res.mode = io_mode::direct;
+    if (cfg.memory_bound) {
+        res.reason = "memory bound: model over budget, direct " + fmt_gbps(probe.direct_gbps) + " GB/s vs cached " +
+                     fmt_gbps(probe.cached_gbps) + " GB/s";
+        return res;
+    }
     res.reason = "model over budget, direct " + fmt_gbps(probe.direct_gbps) + " GB/s vs cached " +
                  fmt_gbps(probe.cached_gbps) + " GB/s";
     return res;
