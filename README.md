@@ -14,10 +14,12 @@ Two things we hit on stock llama.cpp (build b12359, Qwen3.5-9B Q4_K_M, Apple M3 
 - **Strict `lora` lists.** Bad `lora` entries get HTTP 400 instead of being ignored.
 - **A receipt on every answer in eval mode.** Each answer reports the strength and sha256 of every adapter, the model's sha256, which fields gravity filled or overrode, and the device that ran it.
 
+## Experimental, off by default
+- **MoE expert streaming** (`--gravity-stream`, with upstream's `--moe-cache-mib`). Expert weights missing from the GPU cache are read from the model file instead of host memory. Output is bit-identical with the flag on or off. No speed or memory numbers yet, so no claim. Details below.
+
 ## Not built yet
 These are on the roadmap, not in the code:
-- Running models larger than memory by streaming MoE experts from disk (Linux first, then macOS).
-- LoRA adapters on streamed experts.
+- Running models larger than memory with bounded RAM. Streaming above reads from the file, but warmup and prompt processing still read experts through the mmap, so the page cache still fills.
 - One-command install and Windows builds.
 - A public page of measurements.
 
@@ -42,10 +44,20 @@ Everything below is built and tested. Full server docs: [tools/server/README.md]
 - **File hash pins** (`--model-sha256`, `--lora-sha256`). The server hashes the files at startup. On a mismatch it prints `sha256 mismatch for ...: expected X, actual Y` and exits before it loads anything. Why: a result is only tied to an adapter if the file is the one you think it is. Not for split models and not in router mode. Without pins the server warns `not pinned` and starts as before.
 - **Strict per-request `lora`.** Malformed lists return HTTP 400 (not an array, entry not an object, missing or non-integer `id`, `id` outside the loaded adapters, missing or non-numeric `scale`, unknown key, duplicate `id`). The same check runs on `POST /lora-adapters`. Why: upstream silently ignores a bad entry, so an adapter you thought was on could be off.
 - **Eval mode** (`--eval-mode`). One slot, no prompt cache, no continuous batching, every global adapter scale starts at 0. On `/completion`, `/completions`, `/v1/completions` and `/v1/chat/completions`, each absent field is filled with a fixed default (`seed` 0, `temperature` 0, `samplers` `["top_k","temperature"]`, `top_k` 1, `lora` = every adapter at scale 0) and its name is listed in the response. `cache_prompt: true` is forced to `false`. Routes that could run the model without these defaults (for example `POST /lora-adapters`, `/infill`, `/v1/messages`, embeddings) return HTTP 400. Why: both arms of a comparison run under the same fixed settings, and the arm is always explicit.
-- **`gravity` provenance object.** In eval mode every response from the four routes above carries `gravity` (in the final chunk when streaming). Fields: `eval_mode`, `build`, `devices_available`, `devices_used`, `device_info`, `layers_on_device`, `output_device`, `model_sha256`, `lora` (`id`, `scale`, `sha256` per adapter), `seed`, `temperature`, `samplers`, `filled`, `overridden`. Outside eval mode responses stay exactly as upstream; `GET /props` always has the object. Why: the answer itself says which files, which strengths and which settings made it.
+- **`gravity` provenance object.** In eval mode every response from the four routes above carries `gravity` (in the final chunk when streaming). Fields: `eval_mode`, `version` (gravity release), `build` (upstream llama.cpp build), `devices_available`, `devices_used`, `device_info`, `layers_on_device`, `output_device`, `model_sha256`, `lora` (`id`, `scale`, `sha256` per adapter), `seed`, `temperature`, `samplers`, `filled`, `overridden`. Outside eval mode responses stay exactly as upstream; `GET /props` always has the object. Why: the answer itself says which files, which strengths and which settings made it.
 - **Device info.** `devices_used` (device names the model's layers run on), `layers_on_device` (layer count per device), `output_device`, and `device_info` (ggml description and total memory in MiB per used device, so you can tell which card ran). Why: `devices_available` alone does not show where the model ran.
 - **Slot cache clear on global lora change.** A request without `lora` after one with `lora` no longer reuses a prompt cache computed under the other adapter setting. This is upstream's fix (llama.cpp #30367, commit 58a4a6b49), cherry-picked onto v1.0.0.
 - **`--lora-init-without-apply` scale fix.** On v1.0.0 the flag left every adapter scale at 1.0. In gravity the global scales really start at 0, so a request without `lora` runs the base model.
+
+## Experimental: MoE expert streaming
+
+Off unless you set the flags. Built and tested for identical output, not measured for speed or memory.
+
+- **`--gravity-stream`** (needs `--moe-cache-mib N`, upstream's GPU cache for MoE experts kept on the CPU). On a cache miss the expert bytes are read from the model file through a pool of read threads (`--gravity-stream-threads`) instead of copied from host memory. Same bytes, so output is bit-identical to the cache without streaming. The file must be the one that was loaded (device, inode, size, mtime); if it changed, or a read fails, those experts come from host memory and the log says how many. Tested on Metal; the cache it builds on is upstream's, which also runs on CUDA. Known gap: warmup and prompt processing still read experts through the mmap.
+- **LoRA on cached or streamed experts.** Expert LoRA tensors are copied to the cache device once, not every token. That copy is not counted in `--moe-cache-mib`; an INFO line at load prints its size. Server test: answers with an adapter on are bit-identical with `--gravity-stream` on and off.
+- **`--gravity-residency-mib N`** (prototype). Drops cold expert pages of the mmap after each decode to keep resident expert bytes under N MiB. It only works when experts stay in host memory and are computed there. It turns itself off with a warning when the MoE cache is on, when a GPU buffer wraps the experts (full Metal offload pins the pages), or when the OS has no way to drop pages. Not for production use.
+- **`llama-gravity-repack IN OUT [--dry-run]`**. Rewrites a MoE GGUF with 4096-byte alignment and a per-expert offset index (`gravity.expert_index.*` keys). Tensors keep name, type, shape, bytes and order, so stock llama.cpp still loads the file. Run it last: quantize or split first, then repack. Layout idea from [Strata](https://github.com/Niko1221/Strata) (MIT).
+- **`general.alignment` honoured.** The GGUF writer, `gguf-split` and `llama-quantize` keep a file's `general.alignment`.
 
 ## Flags and fields
 
@@ -57,6 +69,9 @@ Only what gravity adds. Everything else is upstream's.
 | `--lora-sha256 HEX` | off | sha256 of one LoRA file. Give once per `--lora` / `--lora-scaled`, same order. Repeatable or comma-separated. |
 | `--eval-mode` | off | Reproducible evaluation, see above. Env `LLAMA_ARG_EVAL_MODE`. |
 | `--lora-init-without-apply` | off | Load adapters with every global scale at 0. Eval mode turns it on. |
+| `--gravity-stream` | off | Experimental. Read MoE cache misses from the model file. Needs `--moe-cache-mib`. Env `LLAMA_ARG_GRAVITY_STREAM`. |
+| `--gravity-stream-threads N` | 4 | Read threads for `--gravity-stream`. Env `LLAMA_ARG_GRAVITY_STREAM_THREADS`. |
+| `--gravity-residency-mib N` | 0 (off) | Prototype. Keep resident expert bytes of the mmap under N MiB. Env `LLAMA_ARG_GRAVITY_RESIDENCY_MIB`. |
 
 | Response field | Where | What |
 |---|---|---|

@@ -5,6 +5,9 @@
 
 // gravity: eval mode (fixed defaults, 1 slot, no cache) and the "gravity" provenance object
 
+// gravity release version (CHANGELOG.md); "build" stays upstream llama.cpp build info
+#define GRAVITY_VERSION "0.1.0"
+
 // force the eval-mode params; zero the global LoRA scales when --lora-init-without-apply or --eval-mode is set
 void gravity_prepare_params(common_params & params);
 

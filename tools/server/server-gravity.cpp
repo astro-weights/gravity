@@ -145,6 +145,7 @@ json gravity_props(const common_params & params, const json & devices) {
     }
     json g = {
         {"eval_mode",    params.eval_mode},
+        {"version",      GRAVITY_VERSION},
         {"build",        std::string(llama_build_info())},
         {"devices_available", devices_available(params)},
         {"model_sha256", pin_or_null(params.model_sha256)},
