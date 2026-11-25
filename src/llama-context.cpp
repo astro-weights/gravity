@@ -768,7 +768,8 @@ void llama_context::gravity_residency_init() {
     // see ggml_backend_dev_buffer_from_host_ptr) whose tensors sit at their file offset (same data - offset per file).
     // MTL0_Mapped is not is_host, but its tensor data is the mmap address (ggml_metal_buffer_map)
     std::map<uint16_t, uintptr_t> file_delta;
-    int n_tensors = 0;
+    int  n_tensors = 0;
+    bool gpu_wrapped = false;
     for (size_t il = 0; il < model.layers.size(); ++il) {
         const auto & layer = model.layers[il];
         for (ggml_tensor * t : { layer.ffn_gate_up_exps, layer.ffn_gate_exps, layer.ffn_up_exps, layer.ffn_down_exps }) {
@@ -795,6 +796,7 @@ void llama_context::gravity_residency_init() {
                 LLAMA_LOG_WARN("%s: gravity residency: %s: %s, residency off\n", __func__, ggml_get_name(t), st.error.c_str());
                 return;
             }
+            gpu_wrapped = gpu_wrapped || !ggml_backend_buffer_is_host(t->buffer);
             n_tensors++;
         }
     }
@@ -805,6 +807,11 @@ void llama_context::gravity_residency_init() {
 
     LLAMA_LOG_INFO("%s: gravity residency: budget %d MiB, %d expert tensors, %.2f MiB experts, drop via %s\n", __func__,
         cparams.gravity_residency_mib, n_tensors, r->lru.total_bytes() / (1024.0*1024.0), gravity::drop_method_name(r->method));
+
+    if (gpu_wrapped) {
+        // measured on macOS (M3 Pro): msync(MS_INVALIDATE) returns 0 but drops no page of a newBufferWithBytesNoCopy buffer
+        LLAMA_LOG_WARN("%s: gravity residency: experts are wrapped by a GPU buffer, which may pin their pages (no drop seen on Metal)\n", __func__);
+    }
 
     const char * diag = getenv("LLAMA_ARG_GRAVITY_RESIDENCY_DIAG");
     r->diag = diag != nullptr && atoi(diag) != 0;
