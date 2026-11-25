@@ -90,6 +90,7 @@ def test_eval_mode_filled_and_echoed(start):
     assert g["overridden"] == []
     assert (g["seed"], g["temperature"], g["samplers"]) == (0, 0, ["top_k", "temperature"])
     assert g["lora"] == [{"id": 0, "scale": 0.0, "sha256": None}]
+    assert g["version"] == "0.1.0"
     assert g["eval_mode"] is True and g["build"] and g["devices_available"] and g["model_sha256"] is None
 
     g = post(s, "/completion", ALL).json()["gravity"]
