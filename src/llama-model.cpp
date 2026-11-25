@@ -40,6 +40,10 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
     switch (arch) {
         case LLM_ARCH_CLIP:
@@ -2167,6 +2171,23 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     }
 
     load_tensors_hadamard();
+
+    // file source of the expert tensors, so the MoE cache can read its misses from the file (gravity stream)
+    gravity_files = ml.file_paths;
+    gravity_file_ids.assign(ml.files.size(), {});
+#ifndef _WIN32
+    for (size_t i = 0; i < ml.files.size(); ++i) {
+        struct stat st;
+        if (fstat(ml.files[i]->file_id(), &st) == 0) {
+            gravity_file_ids[i] = { (uint64_t) st.st_dev, (uint64_t) st.st_ino, (uint64_t) st.st_size, (int64_t) st.st_mtime, true };
+        }
+    }
+#endif
+    for (const auto & [name, w] : ml.weights_map) {
+        if (name.find("_exps") != std::string::npos) {
+            gravity_exps_offs[name] = { w.idx, w.offs };
+        }
+    }
 
     return true;
 }

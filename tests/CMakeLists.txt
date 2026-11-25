@@ -257,6 +257,9 @@ set_tests_properties(test-generate-models PROPERTIES
     FIXTURES_SETUP generate-models
 )
 
+# gravity stream: the MoE cache config of a host-experts arch compares stream on (page, direct, fallback) vs off, needs a GPU
+llama_test(test-llama-archs NAME test-gravity-stream LABEL main ARGS -a deepseek2 -s 1)
+
 # Target model for test-speculative-rejection-sampling
 set(SPEC_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-speculative-models/target")
 file(MAKE_DIRECTORY "${SPEC_TARGET_DIR}")
