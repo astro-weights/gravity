@@ -9,6 +9,18 @@ LORA_FILE_URL = "https://huggingface.co/ggml-org-dev/stories15M_MOE/resolve/main
 PROMPT = "Once upon a time"
 
 
+def require_gpu():
+    # the MoE cache lives on a GPU: without one the server refuses --moe-cache-mib and never starts
+    server = ServerPreset.stories15m_moe()
+    server.start()
+    try:
+        devices = server.make_request("GET", "/props").body.get("gravity", {}).get("devices_available", [])
+    finally:
+        server.stop()
+    if not [d for d in devices if d != "CPU"]:
+        pytest.skip("no GPU device registered, no MoE cache")
+
+
 # experts on the host, a small MoE cache on the device, LoRA on attn and on the *_exps tensors
 def run_server(monkeypatch, stream: bool):
     monkeypatch.setenv("LLAMA_ARG_CPU_MOE", "1")
@@ -51,6 +63,7 @@ def run_server(monkeypatch, stream: bool):
 
 
 def test_gravity_stream_lora_identical(monkeypatch):
+    require_gpu()
     off, log_off = run_server(monkeypatch, stream=False)
     on,  log_on  = run_server(monkeypatch, stream=True)
 
