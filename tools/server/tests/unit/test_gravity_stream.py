@@ -91,6 +91,7 @@ def test_gravity_stream_lora_identical(monkeypatch):
 
 # the LoRA of cached experts is read from its copy on the cache device: same output as the host LoRA
 def test_gravity_lora_exps_copy_identical(monkeypatch):
+    require_gpu()
     new, log_new = run_server(monkeypatch, stream=False)
     old, log_old = run_server(monkeypatch, stream=False, lora_exps_host=True)
 
