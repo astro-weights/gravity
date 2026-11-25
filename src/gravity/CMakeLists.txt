@@ -7,10 +7,12 @@ add_library(gravity-stream STATIC
     swap-policy.cpp
     slot-ring.cpp
     scheduler.cpp
-    residency.cpp
 )
 target_include_directories(gravity-stream PUBLIC .)
 target_compile_features(gravity-stream PUBLIC cxx_std_17)
 set_target_properties(gravity-stream PROPERTIES POSITION_INDEPENDENT_CODE ON)
 find_package(Threads REQUIRED)
 target_link_libraries(gravity-stream PUBLIC Threads::Threads)
+
+# gravity: residency prototype (--gravity-residency-mib), own line to keep stacked PRs apart
+target_sources(gravity-stream PRIVATE residency.cpp)
