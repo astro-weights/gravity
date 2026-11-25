@@ -42,8 +42,9 @@ class residency_lru {
     void mark_used(int layer, int expert);
 
     // Ends the current step. Drops LRU units not used in this step until the estimate is <= budget.
+    // evict_used: units used in this step may go too (last), for when the next steps do not read the mmap (MoE cache).
     // Returns the page-aligned inner ranges of the dropped slices.
-    std::vector<residency_range> end_step();
+    std::vector<residency_range> end_step(bool evict_used = false);
 
     size_t resident_bytes() const { return resident; }
     size_t total_bytes() const { return total; }

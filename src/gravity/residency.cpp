@@ -72,13 +72,13 @@ void residency_lru::mark_used(int layer, int expert) {
     last_use[u] = step;
 }
 
-std::vector<residency_range> residency_lru::end_step() {
+std::vector<residency_range> residency_lru::end_step(bool evict_used) {
     ensure_units();
     std::vector<residency_range> out;
     if (resident > budget) {
         std::vector<size_t> cand;
         for (size_t u = 0; u < is_resident.size(); ++u) {
-            if (is_resident[u] && last_use[u] != step) {
+            if (is_resident[u] && (evict_used || last_use[u] != step)) {
                 cand.push_back(u);
             }
         }
