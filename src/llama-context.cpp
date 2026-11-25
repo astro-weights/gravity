@@ -619,7 +619,7 @@ llama_context::llama_context(
                 cparams.moe_cache_cpu_share = 0.0f;
             }
             moe_cache = std::make_unique<llama_moe_cache>(model, model.no_alloc(), backend_ptrs, backend_buft, cparams.moe_cache_size, cpu_share,
-                cparams.gravity_stream, cparams.gravity_stream_threads);
+                cparams.gravity_stream, cparams.gravity_stream_threads, cparams.gravity_residency_mib > 0);
         } else if (cparams.gravity_stream) {
             LLAMA_LOG_INFO("%s: gravity stream: no MoE cache active, ignored\n", __func__);
         }

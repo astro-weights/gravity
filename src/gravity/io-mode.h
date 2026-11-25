@@ -26,7 +26,8 @@ struct io_probe_result {
 
 struct io_mode_cfg {
     double min_direct_gbps = 4.0;
-    double min_speedup     = 1.3; // direct must beat cached by this factor
+    double min_speedup     = 1.3;   // direct must beat cached by this factor
+    bool   memory_bound    = false; // user capped RAM: page cache fill is the cost, so skip min_speedup
 };
 
 struct io_mode_choice {

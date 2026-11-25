@@ -89,6 +89,38 @@ static void test_rule() {
     CHECK(choose_io_mode(30 * gb, 20 * gb, slow, cfg).mode == io_mode::direct);
 }
 
+static void test_rule_memory_bound() {
+    const uint64_t gb = 1ull << 30;
+    io_mode_cfg mb;
+    mb.memory_bound = true;
+
+    // direct 5.0 vs cached 4.0: above floor, below 1.3x
+    io_probe_result close_r;
+    close_r.ok          = true;
+    close_r.direct_gbps = 5.0;
+    close_r.cached_gbps = 4.0;
+    CHECK(choose_io_mode(30 * gb, 20 * gb, close_r).mode == io_mode::page_cache);
+    io_mode_choice c = choose_io_mode(30 * gb, 20 * gb, close_r, mb);
+    CHECK(c.mode == io_mode::direct);
+    CHECK(c.reason.rfind("memory bound:", 0) == 0);
+
+    // fits budget -> page
+    CHECK(choose_io_mode(10 * gb, 20 * gb, close_r, mb).mode == io_mode::page_cache);
+
+    // probe failed -> page
+    io_probe_result failed = close_r;
+    failed.ok              = false;
+    failed.error           = "open failed";
+    CHECK(choose_io_mode(30 * gb, 20 * gb, failed, mb).mode == io_mode::page_cache);
+    CHECK(choose_io_mode(30 * gb, 20 * gb, io_probe_result{}, mb).mode == io_mode::page_cache);
+
+    // direct below the floor -> page
+    io_probe_result slow = close_r;
+    slow.direct_gbps     = 3.9;
+    slow.cached_gbps     = 3.8;
+    CHECK(choose_io_mode(30 * gb, 20 * gb, slow, mb).mode == io_mode::page_cache);
+}
+
 static void test_aligned_buffer() {
     aligned_buffer b(5000, 4096);
     CHECK(b.ok());
@@ -756,6 +788,7 @@ static void test_direct_reads() {
 
 int main() {
     test_rule();
+    test_rule_memory_bound();
     test_aligned_buffer();
 #ifndef _WIN32
     test_read_full_fake();
