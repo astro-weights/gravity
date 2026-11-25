@@ -501,12 +501,18 @@ static void test_pool_cancel_shutdown() {
         for (int i = 0; i < 20; ++i) {
             pend.push_back(pool.submit(q).id);
         }
-        std::thread opener([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // open the gate only once shutdown has cancelled the queue; poll consumes the id, so keep its completion
+        read_completion last;
+        std::thread     opener([&] {
+            while (!pool.poll(pend.back(), last)) {
+                std::this_thread::yield();
+            }
             g.open();
         });
         pool.shutdown();
         opener.join();
+        CHECK(last.status == read_status::cancelled && last.tag == 9);
+        pend.pop_back();
         for (read_id id : pend) {
             read_completion c = pool.wait(id);
             CHECK(c.status == read_status::cancelled && c.tag == 9);
@@ -540,6 +546,119 @@ static void test_pool_cancel_shutdown() {
     close(fd);
 }
 
+
+// records start order; the request tagged gate_tag blocks until open()
+struct order_gate {
+    gate                  g;
+    std::mutex            m;
+    std::vector<uint64_t> starts;
+
+    read_fn fn() {
+        return [this](const read_req & r) {
+            {
+                std::lock_guard<std::mutex> lock(m);
+                starts.push_back(r.tag);
+            }
+            if (r.tag == gate::gate_tag) {
+                std::unique_lock<std::mutex> lock(g.m);
+                ++g.n_held;
+                g.cv.notify_all();
+                g.cv.wait(lock, [this] { return g.is_open; });
+            }
+            return read_full(r);
+        };
+    }
+};
+
+static void test_pool_priority() {
+    temp_file f(4096, 7);
+    int       fd = open(f.path.c_str(), O_RDONLY);
+    CHECK(fd >= 0);
+    char data[64];
+
+    auto mk = [&](uint64_t tag, read_priority p) {
+        read_req r;
+        r.fd       = fd;
+        r.len      = 16;
+        r.dst      = data;
+        r.tag      = tag;
+        r.priority = p;
+        return r;
+    };
+
+    {
+        // demand jumps queued prefetch; FIFO within each class; running read not preempted
+        order_gate og;
+        read_pool  pool(1, og.fn());
+        read_id    first = pool.submit(mk(gate::gate_tag, read_priority::prefetch)).id;
+        og.g.wait_held(1);
+        read_id p1 = pool.submit(mk(1, read_priority::prefetch)).id;
+        read_id p2 = pool.submit(mk(2, read_priority::prefetch)).id;
+        read_id p3 = pool.submit(mk(3, read_priority::prefetch)).id;
+        read_id d1 = pool.submit(mk(10, read_priority::demand)).id;
+        read_id d2 = pool.submit(mk(11, read_priority::demand)).id;
+        og.g.open();
+        for (read_id id : { first, p1, p2, p3, d1, d2 }) {
+            CHECK(pool.wait(id).status == read_status::ok);
+        }
+        const std::vector<uint64_t> want = { gate::gate_tag, 10, 11, 1, 2, 3 };
+        CHECK(og.starts == want);
+    }
+
+    {
+        // default priority is demand
+        CHECK(read_req().priority == read_priority::demand);
+    }
+
+    {
+        // cancel works on both queues; the others still run in order
+        order_gate og;
+        read_pool  pool(1, og.fn());
+        read_id    first = pool.submit(mk(gate::gate_tag, read_priority::demand)).id;
+        og.g.wait_held(1);
+        read_id p1 = pool.submit(mk(1, read_priority::prefetch)).id;
+        read_id p2 = pool.submit(mk(2, read_priority::prefetch)).id;
+        read_id d1 = pool.submit(mk(10, read_priority::demand)).id;
+        read_id d2 = pool.submit(mk(11, read_priority::demand)).id;
+        CHECK(pool.cancel(p1));
+        CHECK(pool.cancel(d1));
+        CHECK(!pool.cancel(p1));
+        CHECK(pool.wait(p1).status == read_status::cancelled);
+        CHECK(pool.wait(d1).status == read_status::cancelled);
+        og.g.open();
+        CHECK(pool.wait(first).status == read_status::ok);
+        CHECK(pool.wait(d2).status == read_status::ok);
+        CHECK(pool.wait(p2).status == read_status::ok);
+        const std::vector<uint64_t> want = { gate::gate_tag, 11, 2 };
+        CHECK(og.starts == want);
+    }
+
+    {
+        // shutdown cancels both queues, running read finishes
+        order_gate og;
+        read_pool  pool(1, og.fn());
+        read_id    first = pool.submit(mk(gate::gate_tag, read_priority::demand)).id;
+        og.g.wait_held(1);
+        read_id p1 = pool.submit(mk(1, read_priority::prefetch)).id;
+        read_id d1 = pool.submit(mk(10, read_priority::demand)).id;
+        // open the gate only once shutdown has cancelled the queues; poll consumes the id, so keep its completion
+        read_completion c;
+        std::thread     opener([&] {
+            while (!pool.poll(p1, c)) {
+                std::this_thread::yield();
+            }
+            og.g.open();
+        });
+        pool.shutdown();
+        opener.join();
+        CHECK(c.status == read_status::cancelled && c.tag == 1);
+        c = pool.wait(d1);
+        CHECK(c.status == read_status::cancelled && c.tag == 10);
+        CHECK(pool.wait(first).status == read_status::ok);
+        CHECK(og.starts.size() == 1);
+    }
+    close(fd);
+}
 
 static void test_pool_shutdown_from_worker() {
     temp_file f(4096, 9);
@@ -644,6 +763,7 @@ int main() {
     test_pool_random_reads();
     test_pool_errors();
     test_pool_cancel_shutdown();
+    test_pool_priority();
     test_pool_shutdown_from_worker();
     test_direct_reads();
 #endif

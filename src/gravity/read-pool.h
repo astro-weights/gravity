@@ -41,14 +41,23 @@ class aligned_buffer {
 
 using read_id = uint64_t; // 0 = invalid
 
+// Queued demand reads start before queued prefetch reads (FIFO within each class). Running reads are never preempted.
+// Priority only changes timing, never which bytes land in dst.
+// Prefetch can starve under continuous demand; bounded by scheduler max_prefetch_inflight + drop_prefetch.
+enum class read_priority {
+    demand,
+    prefetch,
+};
+
 struct read_req {
-    int      fd           = -1;
-    uint64_t offset       = 0;
-    size_t   len          = 0;
-    void *   dst          = nullptr;
-    uint64_t tag          = 0;
-    size_t   alignment    = 0;     // > 0 for a direct fd: offset, len and dst must be multiples (checked at submit)
-    bool     allow_partial = false; // EOF before len counts as ok with fewer bytes
+    int           fd            = -1;
+    uint64_t      offset        = 0;
+    size_t        len           = 0;
+    void *        dst           = nullptr;
+    uint64_t      tag           = 0;
+    size_t        alignment     = 0;     // > 0 for a direct fd: offset, len and dst must be multiples (checked at submit)
+    bool          allow_partial = false; // EOF before len counts as ok with fewer bytes
+    read_priority priority      = read_priority::demand; // default keeps every caller's behavior unchanged
 };
 
 enum class read_status {
@@ -129,13 +138,15 @@ class read_pool {
         std::mutex                        mtx;
         std::condition_variable           work_cv;
         std::condition_variable           done_cv;
-        std::deque<read_id>               queue;
+        std::deque<read_id>               queue;          // demand
+        std::deque<read_id>               prefetch_queue; // only served when queue is empty
         std::unordered_map<read_id, slot> slots;
         std::vector<std::thread>          workers;
         read_id                           next_id  = 1;
         bool                              stopping = false;
 
         bool take_done(read_id id, read_completion & out); // lock held
+        bool has_queued() const { return !queue.empty() || !prefetch_queue.empty(); }
     };
 
     static void worker(const std::shared_ptr<state> & st);
