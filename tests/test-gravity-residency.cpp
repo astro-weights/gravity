@@ -105,6 +105,41 @@ static void test_lru() {
     CHECK(lru.stats().n_steps == 4);
 }
 
+static void test_evict_used() {
+    const size_t P = 4096;
+    // 1 layer x 4 experts, 1 page each, budget 1 unit: a step that uses all 4 still ends at the budget
+    residency_lru lru(1 * P, P);
+    CHECK(lru.add_tensor(0, 0x100000, 4, P).ok);
+    // first step (MoE cache: nothing read yet) drops down to the budget, oldest-lowest first
+    std::vector<residency_range> r = lru.end_step(true);
+    CHECK(lru.resident_bytes() == P);
+    CHECK(r.size() == 3);
+    CHECK(r[0].addr == 0x100000 && r[1].addr == 0x100000 + P && r[2].addr == 0x100000 + 2 * P);
+
+    // all used in one step (prefill): units used earlier this step order by index, all but one go
+    for (int e = 0; e < 4; ++e) {
+        lru.mark_used(0, e);
+    }
+    CHECK(lru.stats().n_refault_units == 3);
+    r = lru.end_step(true);
+    CHECK(lru.resident_bytes() == P);
+    CHECK(r.size() == 3);
+    CHECK(lru.stats().n_evicted == 6);
+
+    // unused-this-step units go before used ones: use 1 and 2, (3) kept from before is older -> dropped first
+    lru.mark_used(0, 1);
+    lru.mark_used(0, 2);
+    r = lru.end_step(true);
+    CHECK(lru.resident_bytes() == P);
+    CHECK(r.size() == 2);
+    CHECK(r[0].addr == 0x100000 + 3 * P); // the old unit
+    CHECK(r[1].addr == 0x100000 + 1 * P); // then the lower used one, (2) kept
+
+    // under budget: nothing dropped
+    r = lru.end_step(true);
+    CHECK(r.empty());
+}
+
 static void test_unaligned_slices() {
     const size_t P = 4096;
     // slice 1.5 pages at odd base: only full pages inside each slice are dropped
@@ -246,6 +281,7 @@ int main() {
     test_inner();
     test_add_errors();
     test_lru();
+    test_evict_used();
     test_unaligned_slices();
 #if defined(__APPLE__) || defined(__linux__)
     test_os_advice();

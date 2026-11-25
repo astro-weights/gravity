@@ -23,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 //
 // llama_context
@@ -691,6 +692,15 @@ struct llama_gravity_residency {
 
     std::vector<int32_t> ids;
 
+    // with the MoE cache, decode reads the experts from the cache (misses from the file), not from the mmap:
+    // only graphs that read the host experts (ubatch > 32 tokens) need the ids, the sync and the drop
+    bool cache_mode = false;
+    std::unordered_set<const ggml_tensor *> exps;
+    bool     graph_host   = false; // the last built graph reads a host expert tensor
+    bool     step_host    = false; // a ubatch of this decode ran such a graph
+    uint64_t n_host_steps = 0;
+    uint64_t n_skip_steps = 0;     // decodes that did not read the host experts
+
     int64_t  t_ids_us   = 0;
     int64_t  t_drop_us  = 0;
     uint64_t n_ids_read = 0;
@@ -751,9 +761,38 @@ static bool llama_gravity_is_mapped_buf(ggml_backend_buffer_t buf) {
     return name.size() >= suf.size() && name.compare(name.size() - suf.size(), suf.size(), suf) == 0;
 }
 
+// asks the OS to drop the ranges, merging adjacent ones
+static void llama_gravity_residency_drop(llama_gravity_residency & r, std::vector<gravity::residency_range> ranges) {
+    const int64_t t0 = ggml_time_us();
+    std::sort(ranges.begin(), ranges.end(), [](const auto & a, const auto & b) { return a.addr < b.addr; });
+    for (size_t i = 0; i < ranges.size();) {
+        uintptr_t beg = ranges[i].addr;
+        uintptr_t end = beg + ranges[i].len;
+        size_t    j   = i + 1;
+        while (j < ranges.size() && ranges[j].addr == end) {
+            end += ranges[j].len;
+            j++;
+        }
+        if (r.diag) {
+            r.diag_pages_before += gravity::resident_pages((const void *) beg, end - beg);
+        }
+        const int err = gravity::drop_pages((void *) beg, end - beg, r.method);
+        if (r.diag) {
+            r.diag_pages_after += gravity::resident_pages((const void *) beg, end - beg);
+        }
+        if (err != 0) {
+            r.n_drop_err++;
+            r.drop_errno = err;
+        }
+        i = j;
+    }
+    r.t_drop_us += ggml_time_us() - t0;
+}
+
 void llama_context::gravity_residency_init() {
-    if (moe_cache) {
-        LLAMA_LOG_WARN("%s: gravity residency: MoE cache active, residency off\n", __func__);
+    if (moe_cache && !cparams.gravity_stream) {
+        // without streaming the cache uploads its misses from the mmap on every decode, which would refault the dropped pages
+        LLAMA_LOG_WARN("%s: gravity residency: MoE cache without --gravity-stream reads the mmap on decode, residency off\n", __func__);
         return;
     }
     if (gravity::default_drop_method() == gravity::drop_method::none) {
@@ -798,6 +837,7 @@ void llama_context::gravity_residency_init() {
             }
             n_host += ggml_backend_buffer_is_host(t->buffer) ? 1 : 0;
             n_tensors++;
+            r->exps.insert(t);
         }
     }
     if (n_tensors == 0) {
@@ -812,22 +852,74 @@ void llama_context::gravity_residency_init() {
         return;
     }
 
-    LLAMA_LOG_INFO("%s: gravity residency: budget %d MiB, %d expert tensors (%d host), %.2f MiB experts, drop via %s\n", __func__,
-        cparams.gravity_residency_mib, n_tensors, n_host, r->lru.total_bytes() / (1024.0*1024.0), gravity::drop_method_name(r->method));
+    r->cache_mode = moe_cache != nullptr;
+    if (r->cache_mode) {
+        // a GPU-wrapped or uncached expert tensor is read by every decode graph: the sync and drop would run on every token
+        if (n_host != n_tensors) {
+            LLAMA_LOG_WARN("%s: gravity residency: MoE cache with %d of %d expert tensors in host memory, residency off\n", __func__, n_host, n_tensors);
+            return;
+        }
+        for (const ggml_tensor * t : r->exps) {
+            if (moe_cache->get_experts(t) == nullptr) {
+                LLAMA_LOG_WARN("%s: gravity residency: %s is not in the MoE cache, residency off\n", __func__, ggml_get_name(t));
+                return;
+            }
+        }
+        // misses uploaded from host memory would refault the dropped pages on every decode
+        if (!moe_cache->stream_covers_all()) {
+            LLAMA_LOG_WARN("%s: gravity residency: gravity stream is off or does not read every expert tensor from the file, residency off\n", __func__);
+            return;
+        }
+    }
+
+    LLAMA_LOG_INFO("%s: gravity residency: budget %d MiB, %d expert tensors (%d host), %.2f MiB experts, drop via %s%s\n", __func__,
+        cparams.gravity_residency_mib, n_tensors, n_host, r->lru.total_bytes() / (1024.0*1024.0), gravity::drop_method_name(r->method),
+        r->cache_mode ? ", MoE cache: drop only after decodes that read the host experts" : "");
 
     const char * diag = getenv("LLAMA_ARG_GRAVITY_RESIDENCY_DIAG");
     r->diag = diag != nullptr && atoi(diag) != 0;
+
+    if (r->cache_mode) {
+        // decode may never read the mmap again, so drop what loading brought in down to the budget now
+        llama_gravity_residency_drop(*r, r->lru.end_step(true));
+    }
 
     cparams.cb_eval           = llama_gravity_residency_cb;
     cparams.cb_eval_user_data = r.get();
     residency = std::move(r);
 }
 
+void llama_context::gravity_residency_graph(ggml_cgraph * gf) {
+    // before alloc: the scheduler later swaps offloaded weights for their copies in the node sources
+    bool host = false;
+    for (int i = 0; i < ggml_graph_n_nodes(gf) && !host; ++i) {
+        const ggml_tensor * node = ggml_graph_node(gf, i);
+        for (int j = 0; j < GGML_MAX_SRC && !host; ++j) {
+            const ggml_tensor * src = node->src[j];
+            host = src != nullptr && (residency->exps.count(src) > 0 || (src->view_src != nullptr && residency->exps.count(src->view_src) > 0));
+        }
+    }
+    residency->graph_host = host;
+    // the top-k callback forces a sync per MoE layer: only graphs that read the host experts need the ids
+    if (host) {
+        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+    } else {
+        ggml_backend_sched_set_eval_callback(sched.get(), residency->user_cb, residency->user_ud);
+    }
+}
+
 void llama_context::gravity_residency_step() {
+    if (!residency->step_host) {
+        // no graph of this decode read the mmap (MoE cache path): nothing new resident, no sync
+        residency->n_skip_steps++;
+        return;
+    }
+    residency->step_host = false;
+
     // the GPU must be done with the pages before they go
     ggml_backend_sched_synchronize(sched.get());
 
-    if (residency->lru.stats().n_steps == 0 && residency->n_ids_read == 0) {
+    if (residency->n_host_steps == 0 && residency->n_ids_read == 0) {
         // no node named ffn_moe_topk-<il> (fused top-k or other arch): every expert would look cold and thrash
         LLAMA_LOG_WARN("%s: gravity residency: first decode read no ffn_moe_topk ids, residency off\n", __func__);
         cparams.cb_eval           = residency->user_cb;
@@ -838,31 +930,9 @@ void llama_context::gravity_residency_step() {
         return;
     }
 
-    const int64_t t0 = ggml_time_us();
-    std::vector<gravity::residency_range> ranges = residency->lru.end_step();
-    std::sort(ranges.begin(), ranges.end(), [](const auto & a, const auto & b) { return a.addr < b.addr; });
-    for (size_t i = 0; i < ranges.size();) {
-        uintptr_t beg = ranges[i].addr;
-        uintptr_t end = beg + ranges[i].len;
-        size_t    j   = i + 1;
-        while (j < ranges.size() && ranges[j].addr == end) {
-            end += ranges[j].len;
-            j++;
-        }
-        if (residency->diag) {
-            residency->diag_pages_before += gravity::resident_pages((const void *) beg, end - beg);
-        }
-        const int err = gravity::drop_pages((void *) beg, end - beg, residency->method);
-        if (residency->diag) {
-            residency->diag_pages_after += gravity::resident_pages((const void *) beg, end - beg);
-        }
-        if (err != 0) {
-            residency->n_drop_err++;
-            residency->drop_errno = err;
-        }
-        i = j;
-    }
-    residency->t_drop_us += ggml_time_us() - t0;
+    residency->n_host_steps++;
+    // with the cache, decode does not read the mmap: pages used by this step may go too
+    llama_gravity_residency_drop(*residency, residency->lru.end_step(residency->cache_mode));
 }
 
 static void llama_gravity_residency_report(const llama_gravity_residency & r) {
@@ -879,10 +949,10 @@ static void llama_gravity_residency_report(const llama_gravity_residency & r) {
         in_core += n;
     }
     const auto & st = r.lru.stats();
-    LLAMA_LOG_INFO("gravity residency: budget %.2f MiB, est resident %.2f MiB of %.2f MiB, mincore %.2f MiB, steps %" PRIu64 ", evicted %" PRIu64 " units %.2f MiB, refaulted %" PRIu64 " units, "
+    LLAMA_LOG_INFO("gravity residency: budget %.2f MiB, est resident %.2f MiB of %.2f MiB, mincore %.2f MiB, steps %" PRIu64 " (%" PRIu64 " host, %" PRIu64 " skipped), evicted %" PRIu64 " units %.2f MiB, refaulted %" PRIu64 " units, "
         "ids read %" PRIu64 " (%.3f ms), drop %.3f ms, drop errors %" PRIu64 " (errno %d), bad ids %" PRIu64 "\n",
         r.lru.budget_bytes() / (1024.0*1024.0), r.lru.resident_bytes() / (1024.0*1024.0), r.lru.total_bytes() / (1024.0*1024.0),
-        in_core < 0 ? -1.0 : in_core * (double) ps / (1024.0*1024.0), st.n_steps, st.n_evicted, st.bytes_evicted / (1024.0*1024.0), st.n_refault_units,
+        in_core < 0 ? -1.0 : in_core * (double) ps / (1024.0*1024.0), st.n_steps, r.n_host_steps, r.n_skip_steps, st.n_evicted, st.bytes_evicted / (1024.0*1024.0), st.n_refault_units,
         r.n_ids_read, r.t_ids_us / 1000.0, r.t_drop_us / 1000.0, r.n_drop_err, r.drop_errno, r.lru.n_bad_ids());
     if (r.diag) {
         LLAMA_LOG_INFO("gravity residency diag: dropped ranges had %" PRId64 " pages in core before drop, %" PRId64 " right after\n", r.diag_pages_before, r.diag_pages_after);
@@ -2093,6 +2163,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
+        if (residency) {
+            gravity_residency_graph(gf);
+        }
+
         if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
@@ -2110,6 +2184,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         res->set_inputs(&ubatch);
 
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+    }
+
+    if (residency) {
+        residency->step_host |= residency->graph_host;
     }
 
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);

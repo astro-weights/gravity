@@ -348,8 +348,10 @@ private:
     llama_moe_cache_ptr moe_cache;
 
     // gravity residency (--gravity-residency-mib): drops cold expert pages of the mmap after each decode
+    // with the MoE cache, only after a decode whose graph read the host experts (large ubatch, warmup)
     std::unique_ptr<llama_gravity_residency> residency;
     void gravity_residency_init();
+    void gravity_residency_graph(ggml_cgraph * gf); // after a graph build, before alloc
     void gravity_residency_step();
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
