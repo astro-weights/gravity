@@ -616,6 +616,7 @@ struct common_params {
     float  moe_cache_cpu_share = 0.0f; // share of the MoE cache misses computed on the CPU instead of uploaded
     bool    gravity_stream         = false; // MoE cache misses read from the model file (gravity streaming)
     int32_t gravity_stream_threads = 4;     // read threads for gravity_stream
+    int32_t gravity_residency_mib  = 0;     // resident expert bytes budget of the model mmap, 0 = off
 
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 

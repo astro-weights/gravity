@@ -430,6 +430,9 @@ extern "C" {
         // gravity: the MoE cache reads its misses from the model file instead of the host experts, needs moe_cache_size > 0 [EXPERIMENTAL]
         bool    gravity_stream;
         int32_t gravity_stream_threads; // read threads, <= 0 = 4
+
+        // gravity: keep resident expert bytes of the model mmap under N MiB by dropping cold expert pages after each decode, 0 = off [EXPERIMENTAL]
+        int32_t gravity_residency_mib;
     };
 
     struct llama_model_tensor_override {

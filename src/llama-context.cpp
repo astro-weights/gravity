@@ -10,6 +10,7 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-moe-cache.h"
+#include "residency.h"
 #include "llama-ext.h"
 #include "llama-sampler.h"
 #include "llama.h"
@@ -380,6 +381,7 @@ llama_context::llama_context(
     cparams.moe_cache_cpu_share = params.moe_cache_cpu_share;
     cparams.gravity_stream         = params.gravity_stream;
     cparams.gravity_stream_threads = params.gravity_stream_threads > 0 ? params.gravity_stream_threads : 4;
+    cparams.gravity_residency_mib  = params.gravity_residency_mib > 0 ? params.gravity_residency_mib : 0;
 
     // resolved after flash attention, see resolve_fused_ops()
     {
@@ -622,6 +624,10 @@ llama_context::llama_context(
             LLAMA_LOG_INFO("%s: gravity stream: no MoE cache active, ignored\n", __func__);
         }
 
+        if (cparams.gravity_residency_mib > 0) {
+            gravity_residency_init();
+        }
+
         sched_reserve();
 
         if (!cparams.flash_attn) {
@@ -641,6 +647,8 @@ llama_context::llama_context(
         }
     }
 }
+
+static void llama_gravity_residency_report(const llama_gravity_residency & r);
 
 llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
@@ -663,7 +671,222 @@ llama_context::~llama_context() {
             }
         }
     }
+    if (residency) {
+        llama_gravity_residency_report(*residency);
+    }
     ggml_opt_free(opt_ctx);
+}
+
+//
+// gravity residency
+//
+
+struct llama_gravity_residency {
+    gravity::residency_lru lru;
+    gravity::drop_method   method;
+
+    ggml_backend_sched_eval_callback user_cb;
+    void *                           user_ud;
+    bool                             user_need = false;
+
+    std::vector<int32_t> ids;
+
+    int64_t  t_ids_us   = 0;
+    int64_t  t_drop_us  = 0;
+    uint64_t n_ids_read = 0;
+    uint64_t n_drop_err = 0;
+    int      drop_errno = 0;
+
+    // LLAMA_ARG_GRAVITY_RESIDENCY_DIAG=1: mincore before and after each drop, to see if the OS really dropped the pages
+    bool    diag              = false;
+    int64_t diag_pages_before = 0;
+    int64_t diag_pages_after  = 0;
+
+    llama_gravity_residency(size_t budget, size_t page, ggml_backend_sched_eval_callback cb, void * ud) :
+        lru(budget, page), method(gravity::default_drop_method()), user_cb(cb), user_ud(ud) {}
+};
+
+static constexpr char LLAMA_GRAVITY_TOPK_PREFIX[] = "ffn_moe_topk-";
+
+// reads the router choice of each MoE layer; chains to the user's eval callback
+static bool llama_gravity_residency_cb(ggml_tensor * t, bool ask, void * ud) {
+    auto * r = (llama_gravity_residency *) ud;
+    const bool mine = strncmp(t->name, LLAMA_GRAVITY_TOPK_PREFIX, sizeof(LLAMA_GRAVITY_TOPK_PREFIX) - 1) == 0 && t->type == GGML_TYPE_I32;
+
+    if (ask) {
+        r->user_need = r->user_cb ? r->user_cb(t, true, r->user_ud) : false;
+        return mine || r->user_need;
+    }
+
+    if (mine) {
+        const int64_t t0 = ggml_time_us();
+        const int     il = atoi(t->name + sizeof(LLAMA_GRAVITY_TOPK_PREFIX) - 1);
+        const int64_t k  = t->ne[0];
+        const int64_t nr = ggml_nrows(t);
+        r->ids.resize(k*nr);
+        if (ggml_is_contiguous(t)) {
+            ggml_backend_tensor_get(t, r->ids.data(), 0, ggml_nbytes(t));
+        } else {
+            // top-k is a view of the argsort rows
+            for (int64_t i = 0; i < nr; ++i) {
+                ggml_backend_tensor_get(t, r->ids.data() + i*k, i*t->nb[1], k*sizeof(int32_t));
+            }
+        }
+        for (int32_t e : r->ids) {
+            r->lru.mark_used(il, e);
+        }
+        r->n_ids_read++;
+        r->t_ids_us += ggml_time_us() - t0;
+    }
+
+    if (r->user_need && r->user_cb) {
+        return r->user_cb(t, false, r->user_ud);
+    }
+    return true;
+}
+
+static bool llama_gravity_is_mapped_buf(ggml_backend_buffer_t buf) {
+    const std::string name = ggml_backend_buffer_name(buf);
+    const std::string suf  = "_Mapped";
+    return name.size() >= suf.size() && name.compare(name.size() - suf.size(), suf.size(), suf) == 0;
+}
+
+void llama_context::gravity_residency_init() {
+    if (moe_cache) {
+        LLAMA_LOG_WARN("%s: gravity residency: MoE cache active, residency off\n", __func__);
+        return;
+    }
+    if (gravity::default_drop_method() == gravity::drop_method::none) {
+        LLAMA_LOG_WARN("%s: gravity residency: no page drop on this OS, residency off\n", __func__);
+        return;
+    }
+
+    const size_t budget = (size_t) cparams.gravity_residency_mib * 1024 * 1024;
+    auto r = std::make_unique<llama_gravity_residency>(budget, gravity::os_page_size(), cparams.cb_eval, cparams.cb_eval_user_data);
+
+    // dropping pages of an anonymous buffer loses the data: accept only buffers made from the mmap ("*_Mapped" types,
+    // see ggml_backend_dev_buffer_from_host_ptr) whose tensors sit at their file offset (same data - offset per file).
+    // MTL0_Mapped is not is_host, but its tensor data is the mmap address (ggml_metal_buffer_map)
+    std::map<uint16_t, uintptr_t> file_delta;
+    int  n_tensors = 0;
+    int  n_host    = 0;
+    for (size_t il = 0; il < model.layers.size(); ++il) {
+        const auto & layer = model.layers[il];
+        for (ggml_tensor * t : { layer.ffn_gate_up_exps, layer.ffn_gate_exps, layer.ffn_up_exps, layer.ffn_down_exps }) {
+            if (t == nullptr) {
+                continue;
+            }
+            const auto it = model.gravity_exps_offs.find(ggml_get_name(t));
+            const bool ok_buf = t->buffer != nullptr && t->data != nullptr &&
+                ggml_backend_buffer_get_usage(t->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS && ggml_is_contiguous(t) && t->ne[2] > 0 &&
+                llama_gravity_is_mapped_buf(t->buffer);
+            if (!ok_buf || it == model.gravity_exps_offs.end()) {
+                LLAMA_LOG_WARN("%s: gravity residency: %s is not a host mmap tensor (buffer %s), residency off\n", __func__, ggml_get_name(t),
+                    t->buffer ? ggml_backend_buffer_name(t->buffer) : "none");
+                return;
+            }
+            const uintptr_t delta = (uintptr_t) t->data - (uintptr_t) it->second.second;
+            const auto      fd    = file_delta.emplace(it->second.first, delta);
+            if (fd.first->second != delta) {
+                LLAMA_LOG_WARN("%s: gravity residency: %s is not at its file offset in the mmap, residency off\n", __func__, ggml_get_name(t));
+                return;
+            }
+            const auto st = r->lru.add_tensor((int) il, (uintptr_t) t->data, (int) t->ne[2], t->nb[2]);
+            if (!st.ok) {
+                LLAMA_LOG_WARN("%s: gravity residency: %s: %s, residency off\n", __func__, ggml_get_name(t), st.error.c_str());
+                return;
+            }
+            n_host += ggml_backend_buffer_is_host(t->buffer) ? 1 : 0;
+            n_tensors++;
+        }
+    }
+    if (n_tensors == 0) {
+        LLAMA_LOG_INFO("%s: gravity residency: no expert tensors, ignored\n", __func__);
+        return;
+    }
+
+    if (n_host == 0) {
+        // measured on macOS (M3 Pro): msync(MS_INVALIDATE) returns 0 but drops no page of a newBufferWithBytesNoCopy buffer,
+        // so the callback and sync would cost speed for nothing
+        LLAMA_LOG_WARN("%s: gravity residency: experts are wrapped by a GPU buffer, which may pin their pages (no drop seen on Metal), residency off\n", __func__);
+        return;
+    }
+
+    LLAMA_LOG_INFO("%s: gravity residency: budget %d MiB, %d expert tensors (%d host), %.2f MiB experts, drop via %s\n", __func__,
+        cparams.gravity_residency_mib, n_tensors, n_host, r->lru.total_bytes() / (1024.0*1024.0), gravity::drop_method_name(r->method));
+
+    const char * diag = getenv("LLAMA_ARG_GRAVITY_RESIDENCY_DIAG");
+    r->diag = diag != nullptr && atoi(diag) != 0;
+
+    cparams.cb_eval           = llama_gravity_residency_cb;
+    cparams.cb_eval_user_data = r.get();
+    residency = std::move(r);
+}
+
+void llama_context::gravity_residency_step() {
+    // the GPU must be done with the pages before they go
+    ggml_backend_sched_synchronize(sched.get());
+
+    if (residency->lru.stats().n_steps == 0 && residency->n_ids_read == 0) {
+        // no node named ffn_moe_topk-<il> (fused top-k or other arch): every expert would look cold and thrash
+        LLAMA_LOG_WARN("%s: gravity residency: first decode read no ffn_moe_topk ids, residency off\n", __func__);
+        cparams.cb_eval           = residency->user_cb;
+        cparams.cb_eval_user_data = residency->user_ud;
+        // a reused graph keeps the sched callback, so reset it before the state it points to goes
+        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        residency.reset();
+        return;
+    }
+
+    const int64_t t0 = ggml_time_us();
+    std::vector<gravity::residency_range> ranges = residency->lru.end_step();
+    std::sort(ranges.begin(), ranges.end(), [](const auto & a, const auto & b) { return a.addr < b.addr; });
+    for (size_t i = 0; i < ranges.size();) {
+        uintptr_t beg = ranges[i].addr;
+        uintptr_t end = beg + ranges[i].len;
+        size_t    j   = i + 1;
+        while (j < ranges.size() && ranges[j].addr == end) {
+            end += ranges[j].len;
+            j++;
+        }
+        if (residency->diag) {
+            residency->diag_pages_before += gravity::resident_pages((const void *) beg, end - beg);
+        }
+        const int err = gravity::drop_pages((void *) beg, end - beg, residency->method);
+        if (residency->diag) {
+            residency->diag_pages_after += gravity::resident_pages((const void *) beg, end - beg);
+        }
+        if (err != 0) {
+            residency->n_drop_err++;
+            residency->drop_errno = err;
+        }
+        i = j;
+    }
+    residency->t_drop_us += ggml_time_us() - t0;
+}
+
+static void llama_gravity_residency_report(const llama_gravity_residency & r) {
+    // mincore over the expert ranges checks the own estimate
+    const size_t ps = gravity::os_page_size();
+    int64_t in_core = 0;
+    for (const auto & rg : r.lru.all_ranges()) {
+        const uintptr_t beg = rg.addr / ps * ps;
+        const int64_t   n   = gravity::resident_pages((const void *) beg, rg.addr + rg.len - beg);
+        if (n < 0) {
+            in_core = -1;
+            break;
+        }
+        in_core += n;
+    }
+    const auto & st = r.lru.stats();
+    LLAMA_LOG_INFO("gravity residency: budget %.2f MiB, est resident %.2f MiB of %.2f MiB, mincore %.2f MiB, steps %" PRIu64 ", evicted %" PRIu64 " units %.2f MiB, refaulted %" PRIu64 " units, "
+        "ids read %" PRIu64 " (%.3f ms), drop %.3f ms, drop errors %" PRIu64 " (errno %d), bad ids %" PRIu64 "\n",
+        r.lru.budget_bytes() / (1024.0*1024.0), r.lru.resident_bytes() / (1024.0*1024.0), r.lru.total_bytes() / (1024.0*1024.0),
+        in_core < 0 ? -1.0 : in_core * (double) ps / (1024.0*1024.0), st.n_steps, st.n_evicted, st.bytes_evicted / (1024.0*1024.0), st.n_refault_units,
+        r.n_ids_read, r.t_ids_us / 1000.0, r.t_drop_us / 1000.0, r.n_drop_err, r.drop_errno, r.lru.n_bad_ids());
+    if (r.diag) {
+        LLAMA_LOG_INFO("gravity residency diag: dropped ranges had %" PRId64 " pages in core before drop, %" PRId64 " right after\n", r.diag_pages_before, r.diag_pages_after);
+    }
 }
 
 void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs) {
@@ -2616,6 +2839,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         }
     }
 
+    if (residency) {
+        gravity_residency_step();
+    }
+
     // wait for the computation to finish (automatically done when obtaining the model output)
     //synchronize();
 
@@ -4466,6 +4693,7 @@ llama_context_params llama_context_default_params() {
         /*.ctx_other                   =*/ nullptr,
         /*.gravity_stream              =*/ false,
         /*.gravity_stream_threads      =*/ 4,
+        /*.gravity_residency_mib       =*/ 0,
     };
 
     return result;
