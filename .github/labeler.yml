@@ -75,3 +75,12 @@ model:
     - src/llama-adapter.*
     - tools/server/**/*lora*
     - common/*lora*
+'area: stream':
+- changed-files:
+  - any-glob-to-any-file:
+    - src/gravity/**
+'area: bench':
+- changed-files:
+  - any-glob-to-any-file:
+    - scripts/gravity-bench.py
+    - docs/gravity-bench.md
