@@ -5,7 +5,7 @@ name: macOS build
 # workflow_dispatch: manual dry run (build + smoke test). The job uploads nothing, so any ref is safe.
 on:
   push:
-    tags: ["v*"]
+    tags: ["gravity-v*"]
   workflow_dispatch:
 
 permissions:
