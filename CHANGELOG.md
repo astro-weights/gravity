@@ -4,7 +4,7 @@ All notable changes to gravity are listed here. gravity is a fork of llama.cpp; 
 
 ## [0.1.0] - unreleased
 
-Based on llama.cpp v1.0.0 (`b1b770d90`).
+Tag `gravity-v0.1.0`. gravity tags carry the `gravity-` prefix because upstream llama.cpp already uses `v0.1.0` to `v1.0.0`. Based on llama.cpp v1.0.0 (`b1b770d90`).
 
 ### Added
 
