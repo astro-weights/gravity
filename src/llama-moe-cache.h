@@ -29,6 +29,9 @@ public:
     // the experts of w in the cache, nullptr if w is not cached
     ggml_tensor * get_experts(const ggml_tensor * w) const;
 
+    // the buffer type of the device that caches w, nullptr if w is not cached
+    ggml_backend_buffer_type_t get_buft(const ggml_tensor * w) const;
+
     // the experts of layer il computed on the CPU: I32 [1, n_expert] in host memory, e for these experts, -1 for the others
     // nullptr if no misses of layer il are computed on the CPU for ubatches of n_tokens tokens
     ggml_tensor * get_cpu_map(int32_t il, int64_t n_tokens) const;

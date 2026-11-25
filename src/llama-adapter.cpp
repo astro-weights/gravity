@@ -1,4 +1,5 @@
 #include "llama-adapter.h"
+#include "llama-moe-cache.h"
 
 #include "llama-impl.h"
 #include "llama-mmap.h"
@@ -499,6 +500,67 @@ int32_t llama_adapter_meta_val_str_by_index(const llama_adapter_lora * adapter, 
     auto it = adapter->gguf_kv.begin();
     std::advance(it, i);
     return snprintf(buf, buf_size, "%s", it->second.c_str());
+}
+
+// caller holds copies_mutex
+ggml_tensor * llama_adapter_lora::make_copy(const ggml_tensor * t, ggml_backend_buffer_type_t buft) {
+    auto [it, added] = copies.try_emplace({ t, buft });
+    copy & c = it->second;
+    if (!added) {
+        return c.tensor;
+    }
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead(),
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    c.ctx.reset(ggml_init(params));
+    if (!c.ctx) {
+        LLAMA_LOG_WARN("%s: no context for the copy of '%s', it is read from '%s'\n", __func__, t->name, ggml_backend_buffer_name(t->buffer));
+        return nullptr;
+    }
+    ggml_tensor * dst = ggml_dup_tensor(c.ctx.get(), t);
+    ggml_set_name(dst, t->name);
+    c.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(c.ctx.get(), buft));
+    if (!c.buf) {
+        LLAMA_LOG_WARN("%s: cannot allocate the copy of '%s' in %s, it is read from '%s'\n", __func__, t->name, ggml_backend_buft_name(buft), ggml_backend_buffer_name(t->buffer));
+        c.ctx.reset();
+        return nullptr;
+    }
+    ggml_backend_buffer_set_usage(c.buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    ggml_backend_tensor_copy(t, dst);
+    LLAMA_LOG_DEBUG("%s: %s: copy of '%s' = %.2f MiB\n", __func__, ggml_backend_buft_name(buft), t->name, ggml_nbytes(dst)/1024.0/1024.0);
+
+    c.tensor = dst;
+    return dst;
+}
+
+ggml_tensor * llama_adapter_lora::get_copy(const ggml_tensor * t, ggml_backend_buffer_type_t buft, const llama_moe_cache & cache) {
+    std::lock_guard<std::mutex> lock(copies_mutex);
+
+    // all copies of a buft are made at once, so their VRAM, outside of the cache budget, is logged in one line
+    if (copied_bufts.insert(buft).second && model != nullptr) {
+        size_t n = 0;
+        size_t bytes = 0;
+        for (const auto & [name, w] : ab_map) {
+            const ggml_tensor * base = model->get_tensor(name.c_str());
+            if (base == nullptr || cache.get_buft(base) != buft) {
+                continue;
+            }
+            for (const ggml_tensor * src : { w.a, w.b }) {
+                if (src->buffer != nullptr && ggml_backend_buffer_get_type(src->buffer) != buft && make_copy(src, buft) != nullptr) {
+                    n++;
+                    bytes += ggml_nbytes(src);
+                }
+            }
+        }
+        if (n > 0) {
+            LLAMA_LOG_INFO("gravity: LoRA expert copy on %s: %zu tensors, %.2f MiB (not in --moe-cache-mib)\n", ggml_backend_buft_name(buft), n, bytes/1024.0/1024.0);
+        }
+    }
+
+    return make_copy(t, buft);
 }
 
 void llama_adapter_lora_free(llama_adapter_lora * adapter) {
