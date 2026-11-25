@@ -1,8 +1,8 @@
 name: Sanitizers
 
 # ASan + UBSan and TSan on gravity's own code (src/gravity, the threaded read pool and scheduler).
-# Builds only the four test-gravity-* targets (they link gravity-stream, not libllama): about 2 min
-# per leg. Path-filtered so upstream-only PRs spend nothing.
+# Builds every test-gravity-* target found by CMake, plus test-llama-archs (ctest test-gravity-stream),
+# so new gravity tests are picked up without editing this file. Path-filtered so upstream-only PRs spend nothing.
 on:
   pull_request:
     paths:
@@ -46,7 +46,8 @@ jobs:
         run: |
           # shellcheck disable=SC2086
           cmake -B build -DCMAKE_BUILD_TYPE=Debug -DGGML_NATIVE=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_SERVER=OFF $FLAGS
-          cmake --build build -j "$(nproc)" --target test-gravity-mem-budget test-gravity-io test-gravity-swap test-gravity-scheduler
+          mapfile -t targets < <(cmake --build build --target help | grep -o 'test-gravity-[a-z0-9-]*' | sort -u)
+          cmake --build build -j "$(nproc)" --target "${targets[@]}" test-llama-archs
       - name: Run
         env:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
