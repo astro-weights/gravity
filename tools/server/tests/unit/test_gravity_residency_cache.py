@@ -12,6 +12,7 @@ PROMPT = ("Once upon a time there was a little girl named Lily. She loved to pla
           "One day she saw a big red ball in the tall green grass near the old tree, and she ran to get it before her brother could")
 
 BUDGET_MIB = 8
+N_PREDICT  = 64
 
 
 def require_gpu():
@@ -65,7 +66,7 @@ def run_server(monkeypatch, on: bool, model_file: str | None = None):
         server.start()
         res = server.make_request("POST", "/completion", data={
             "prompt": PROMPT,
-            "n_predict": 64,
+            "n_predict": N_PREDICT,
             "temperature": 0.0,
             "seed": 42,
         })
@@ -94,16 +95,19 @@ def test_gravity_residency_cache(monkeypatch, tmp_path):
     if "MoE cache size" not in log_on:
         pytest.skip("no MoE cache on this host (no GPU)")
     m = re.search(r"gravity residency: budget [0-9.]+ MiB, est resident [0-9.]+ MiB of ([0-9.]+) MiB, mincore ([0-9.-]+) MiB, "
-                  r"steps [0-9]+ \(([0-9]+) host", log_on)
+                  r"steps [0-9]+ \(([0-9]+) host, ([0-9]+) skipped\)", log_on)
     assert m is not None, f"no gravity residency stats line, log:\n{info}"
-    total, mincore, n_host = float(m.group(1)), float(m.group(2)), int(m.group(3))
+    total, mincore, n_host, n_skip = float(m.group(1)), float(m.group(2)), int(m.group(3)), int(m.group(4))
     d = re.search(r"gravity residency diag: dropped ranges had ([0-9]+) pages in core before drop, ([0-9]+) right after", log_on)
     assert d is not None, f"no gravity residency diag line, log:\n{info}"
     before, after = int(d.group(1)), int(d.group(2))
-    nums = f"mincore {mincore} MiB, total {total} MiB, host steps {n_host}, diag pages {before} -> {after}, log:\n{info}"
+    nums = f"mincore {mincore} MiB, total {total} MiB, host steps {n_host}, skipped {n_skip}, diag pages {before} -> {after}, log:\n{info}"
     assert n_host >= 1, f"the prompt did not run the experts from the host mmap: {nums}"
+    # the cache-path decodes must not pay the callback, sync and drop: only the prompt (and maybe warmup) is a host step
+    assert n_host <= 2 and n_skip >= N_PREDICT - 1, f"decode steps read the host experts: {nums}"
     if before > 0 and after >= before:
-        # Linux MADV_DONTNEED unmaps the pages but the page cache keeps them, so mincore does not change
+        # Linux MADV_DONTNEED unmaps the pages but the page cache keeps them, so mincore does not change.
+        # Skip signed off by the lead: CI Linux runners have no GPU, so this test skips there before this point anyway
         pytest.skip(f"the page drop does not change mincore on this OS: {nums}")
     # one layer of slack: expert slices are not page aligned, and edge pages stay
     n_layer = 6

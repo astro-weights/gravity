@@ -853,6 +853,24 @@ void llama_context::gravity_residency_init() {
     }
 
     r->cache_mode = moe_cache != nullptr;
+    if (r->cache_mode) {
+        // a GPU-wrapped or uncached expert tensor is read by every decode graph: the sync and drop would run on every token
+        if (n_host != n_tensors) {
+            LLAMA_LOG_WARN("%s: gravity residency: MoE cache with %d of %d expert tensors in host memory, residency off\n", __func__, n_host, n_tensors);
+            return;
+        }
+        for (const ggml_tensor * t : r->exps) {
+            if (moe_cache->get_experts(t) == nullptr) {
+                LLAMA_LOG_WARN("%s: gravity residency: %s is not in the MoE cache, residency off\n", __func__, ggml_get_name(t));
+                return;
+            }
+        }
+        // misses uploaded from host memory would refault the dropped pages on every decode
+        if (!moe_cache->stream_covers_all()) {
+            LLAMA_LOG_WARN("%s: gravity residency: gravity stream is off or does not read every expert tensor from the file, residency off\n", __func__);
+            return;
+        }
+    }
 
     LLAMA_LOG_INFO("%s: gravity residency: budget %d MiB, %d expert tensors (%d host), %.2f MiB experts, drop via %s%s\n", __func__,
         cparams.gravity_residency_mib, n_tensors, n_host, r->lru.total_bytes() / (1024.0*1024.0), gravity::drop_method_name(r->method),

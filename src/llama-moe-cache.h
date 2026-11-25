@@ -46,6 +46,10 @@ public:
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const;
 
+    // gravity stream is active and reads the misses of every cached expert tensor from the file (none from host memory)
+    // read errors at run time still fall back to host memory, see the stream stats at exit
+    bool stream_covers_all() const;
+
 private:
     struct impl;
     std::unique_ptr<impl> pimpl;
