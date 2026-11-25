@@ -1067,6 +1067,11 @@ struct llama_moe_cache::impl {
         return it != bindings.end() ? it->second.cached : nullptr;
     }
 
+    ggml_backend_buffer_type_t get_buft(const ggml_tensor * w) const {
+        const auto it = bindings.find(w);
+        return it != bindings.end() ? devices[groups[layers[it->second.il].ig].id].buft : nullptr;
+    }
+
     int64_t copy_experts(ggml_backend_t backend, const ggml_tensor * w, ggml_tensor * dst, int64_t e, int64_t last) {
         const auto it = bindings.find(w);
         if (it == bindings.end()) {
@@ -1240,6 +1245,10 @@ ggml_tensor * llama_moe_cache::get_slot_map(int32_t il, int64_t n_tokens, int64_
 
 ggml_tensor * llama_moe_cache::get_experts(const ggml_tensor * w) const {
     return pimpl->get_experts(w);
+}
+
+ggml_backend_buffer_type_t llama_moe_cache::get_buft(const ggml_tensor * w) const {
+    return pimpl->get_buft(w);
 }
 
 ggml_tensor * llama_moe_cache::get_cpu_map(int32_t il, int64_t n_tokens) const {

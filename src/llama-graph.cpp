@@ -1798,9 +1798,30 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
         const float rank  = (float) lw->b->ne[0];
         const float scale = alpha ? lora.second * alpha / rank : lora.second;
 
+        // the delta of cached experts runs on the cache device: read the LoRA from a copy there, not from the host
+        // LLAMA_LORA_EXPS_HOST=1 keeps the host LoRA (the scheduler copies all experts of it in every graph), to compare
+        ggml_tensor * lora_a = lw->a;
+        ggml_tensor * lora_b = lw->b;
+        static const bool lora_exps_host = [] {
+            const char * env = getenv("LLAMA_LORA_EXPS_HOST");
+            return env != nullptr && atoi(env) != 0;
+        }();
+        if (slots != nullptr && !lora_exps_host) {
+            ggml_backend_buffer_type_t buft = moe_cache->get_buft(w);
+            if (buft != nullptr && lw->a->buffer != nullptr && lw->b->buffer != nullptr &&
+                ggml_backend_buffer_get_type(lw->a->buffer) != buft && ggml_backend_buffer_get_type(lw->b->buffer) != buft) {
+                ggml_tensor * a = lora.first->get_copy(lw->a, buft);
+                ggml_tensor * b = a != nullptr ? lora.first->get_copy(lw->b, buft) : nullptr;
+                if (b != nullptr) {
+                    lora_a = a;
+                    lora_b = b;
+                }
+            }
+        }
+
         ggml_tensor * ab_cur = ggml_mul_mat_id(
-                ctx0, lw->b,
-                ggml_mul_mat_id(ctx0, lw->a, cur, ids),
+                ctx0, lora_b,
+                ggml_mul_mat_id(ctx0, lora_a, cur, ids),
                 ids
                 );
 

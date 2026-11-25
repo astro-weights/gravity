@@ -4,6 +4,8 @@
 
 #include "ggml-cpp.h"
 
+#include <map>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -81,6 +83,19 @@ struct llama_adapter_lora {
     ~llama_adapter_lora() = default;
 
     llama_adapter_lora_weight * get_weight(ggml_tensor * w);
+
+    // the copy of the LoRA tensor t in buft, made on first use, nullptr if it cannot be made
+    // the MoE cache reads the host experts on its device: without a copy the scheduler would copy t there in every graph
+    ggml_tensor * get_copy(const ggml_tensor * t, ggml_backend_buffer_type_t buft);
+
+    // a copy owns its context and buffer, a failed copy is kept as empty to not retry it in every graph
+    struct copy {
+        ggml_context_ptr ctx;
+        ggml_backend_buffer_ptr buf;
+        ggml_tensor * tensor = nullptr;
+    };
+    std::map<std::pair<const ggml_tensor *, ggml_backend_buffer_type_t>, copy> copies;
+    std::mutex copies_mutex; // contexts sharing the adapter build their graphs concurrently
 
     uint32_t get_n_nodes() const {
         return ab_map.size() * 6u; // a, b, scale, add, 2 x mul_mat

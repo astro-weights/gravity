@@ -22,7 +22,12 @@ def require_gpu():
 
 
 # experts on the host, a small MoE cache on the device, LoRA on attn and on the *_exps tensors
-def run_server(monkeypatch, stream: bool):
+# lora_exps_host: the old path, the scheduler copies the host LoRA of the *_exps tensors to the device in every graph
+def run_server(monkeypatch, stream: bool, lora_exps_host: bool = False):
+    if lora_exps_host:
+        monkeypatch.setenv("LLAMA_LORA_EXPS_HOST", "1")
+    else:
+        monkeypatch.delenv("LLAMA_LORA_EXPS_HOST", raising=False)
     monkeypatch.setenv("LLAMA_ARG_CPU_MOE", "1")
     monkeypatch.setenv("LLAMA_ARG_MOE_CACHE_MIB", "8")
     monkeypatch.setenv("LLAMA_ARG_FIT", "off")
@@ -82,3 +87,17 @@ def test_gravity_stream_lora_identical(monkeypatch):
     m = re.search(r"gravity stream: read = ([0-9.]+) MiB", log_on)
     assert m is not None and float(m.group(1)) > 0, "gravity stream read nothing"
     assert "gravity stream: read" not in log_off
+
+
+# the LoRA of cached experts is read from its copy on the cache device: same output as the host LoRA
+def test_gravity_lora_exps_copy_identical(monkeypatch):
+    new, log_new = run_server(monkeypatch, stream=False)
+    old, log_old = run_server(monkeypatch, stream=False, lora_exps_host=True)
+
+    for scale in (0.0, 1.0):
+        assert new[scale] == old[scale], f"scale {scale}: device LoRA {new[scale]!r} != host LoRA {old[scale]!r}"
+
+    if "MoE cache size" not in log_new:
+        pytest.skip("no MoE cache on this host (no GPU)")
+    assert re.search(r"copy of 'blk\.\d+\.ffn_\w+_exps\.weight\.lora_[ab]'", log_new), "no device copy of the expert LoRA"
+    assert "copy of 'blk." not in log_old

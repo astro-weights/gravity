@@ -501,6 +501,41 @@ int32_t llama_adapter_meta_val_str_by_index(const llama_adapter_lora * adapter, 
     return snprintf(buf, buf_size, "%s", it->second.c_str());
 }
 
+ggml_tensor * llama_adapter_lora::get_copy(const ggml_tensor * t, ggml_backend_buffer_type_t buft) {
+    std::lock_guard<std::mutex> lock(copies_mutex);
+
+    auto [it, added] = copies.try_emplace({ t, buft });
+    copy & c = it->second;
+    if (!added) {
+        return c.tensor;
+    }
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead(),
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    c.ctx.reset(ggml_init(params));
+    if (!c.ctx) {
+        LLAMA_LOG_WARN("%s: no context for the copy of '%s', it is read from '%s'\n", __func__, t->name, ggml_backend_buffer_name(t->buffer));
+        return nullptr;
+    }
+    ggml_tensor * dst = ggml_dup_tensor(c.ctx.get(), t);
+    ggml_set_name(dst, t->name);
+    c.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(c.ctx.get(), buft));
+    if (!c.buf) {
+        LLAMA_LOG_WARN("%s: cannot allocate the copy of '%s' in %s, it is read from '%s'\n", __func__, t->name, ggml_backend_buft_name(buft), ggml_backend_buffer_name(t->buffer));
+        c.ctx.reset();
+        return nullptr;
+    }
+    ggml_backend_buffer_set_usage(c.buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    ggml_backend_tensor_copy(t, dst);
+    LLAMA_LOG_DEBUG("%s: %s: copy of '%s' = %.2f MiB\n", __func__, ggml_backend_buft_name(buft), t->name, ggml_nbytes(dst)/1024.0/1024.0);
+
+    c.tensor = dst;
+    return dst;
+}
+
 void llama_adapter_lora_free(llama_adapter_lora * adapter) {
     if (adapter == nullptr) {
         return;
