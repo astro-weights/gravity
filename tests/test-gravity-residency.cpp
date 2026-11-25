@@ -231,7 +231,7 @@ static void test_model_bit_identical() {
         return;
     }
     llama_backend_init();
-    // ngl 0: CPU_Mapped experts, pages really drop and refault; ngl 99: Metal/GPU mapped path
+    // ngl 0: CPU_Mapped experts, pages really drop and refault; ngl 99: GPU-wrapped experts turn residency off at init
     for (int ngl : { 0, 99 }) {
         const std::vector<llama_token> off = greedy(path, ngl, 0, 64);
         const std::vector<llama_token> on  = greedy(path, ngl, 1, 64);

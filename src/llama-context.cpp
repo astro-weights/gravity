@@ -769,7 +769,7 @@ void llama_context::gravity_residency_init() {
     // MTL0_Mapped is not is_host, but its tensor data is the mmap address (ggml_metal_buffer_map)
     std::map<uint16_t, uintptr_t> file_delta;
     int  n_tensors = 0;
-    bool gpu_wrapped = false;
+    int  n_host    = 0;
     for (size_t il = 0; il < model.layers.size(); ++il) {
         const auto & layer = model.layers[il];
         for (ggml_tensor * t : { layer.ffn_gate_up_exps, layer.ffn_gate_exps, layer.ffn_up_exps, layer.ffn_down_exps }) {
@@ -796,7 +796,7 @@ void llama_context::gravity_residency_init() {
                 LLAMA_LOG_WARN("%s: gravity residency: %s: %s, residency off\n", __func__, ggml_get_name(t), st.error.c_str());
                 return;
             }
-            gpu_wrapped = gpu_wrapped || !ggml_backend_buffer_is_host(t->buffer);
+            n_host += ggml_backend_buffer_is_host(t->buffer) ? 1 : 0;
             n_tensors++;
         }
     }
@@ -805,13 +805,15 @@ void llama_context::gravity_residency_init() {
         return;
     }
 
-    LLAMA_LOG_INFO("%s: gravity residency: budget %d MiB, %d expert tensors, %.2f MiB experts, drop via %s\n", __func__,
-        cparams.gravity_residency_mib, n_tensors, r->lru.total_bytes() / (1024.0*1024.0), gravity::drop_method_name(r->method));
-
-    if (gpu_wrapped) {
-        // measured on macOS (M3 Pro): msync(MS_INVALIDATE) returns 0 but drops no page of a newBufferWithBytesNoCopy buffer
-        LLAMA_LOG_WARN("%s: gravity residency: experts are wrapped by a GPU buffer, which may pin their pages (no drop seen on Metal)\n", __func__);
+    if (n_host == 0) {
+        // measured on macOS (M3 Pro): msync(MS_INVALIDATE) returns 0 but drops no page of a newBufferWithBytesNoCopy buffer,
+        // so the callback and sync would cost speed for nothing
+        LLAMA_LOG_WARN("%s: gravity residency: experts are wrapped by a GPU buffer, which may pin their pages (no drop seen on Metal), residency off\n", __func__);
+        return;
     }
+
+    LLAMA_LOG_INFO("%s: gravity residency: budget %d MiB, %d expert tensors (%d host), %.2f MiB experts, drop via %s\n", __func__,
+        cparams.gravity_residency_mib, n_tensors, n_host, r->lru.total_bytes() / (1024.0*1024.0), gravity::drop_method_name(r->method));
 
     const char * diag = getenv("LLAMA_ARG_GRAVITY_RESIDENCY_DIAG");
     r->diag = diag != nullptr && atoi(diag) != 0;
@@ -824,6 +826,17 @@ void llama_context::gravity_residency_init() {
 void llama_context::gravity_residency_step() {
     // the GPU must be done with the pages before they go
     ggml_backend_sched_synchronize(sched.get());
+
+    if (residency->lru.stats().n_steps == 0 && residency->n_ids_read == 0) {
+        // no node named ffn_moe_topk-<il> (fused top-k or other arch): every expert would look cold and thrash
+        LLAMA_LOG_WARN("%s: gravity residency: first decode read no ffn_moe_topk ids, residency off\n", __func__);
+        cparams.cb_eval           = residency->user_cb;
+        cparams.cb_eval_user_data = residency->user_ud;
+        // a reused graph keeps the sched callback, so reset it before the state it points to goes
+        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        residency.reset();
+        return;
+    }
 
     const int64_t t0 = ggml_time_us();
     std::vector<gravity::residency_range> ranges = residency->lru.end_step();
