@@ -1810,8 +1810,8 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
             ggml_backend_buffer_type_t buft = moe_cache->get_buft(w);
             if (buft != nullptr && lw->a->buffer != nullptr && lw->b->buffer != nullptr &&
                 ggml_backend_buffer_get_type(lw->a->buffer) != buft && ggml_backend_buffer_get_type(lw->b->buffer) != buft) {
-                ggml_tensor * a = lora.first->get_copy(lw->a, buft);
-                ggml_tensor * b = a != nullptr ? lora.first->get_copy(lw->b, buft) : nullptr;
+                ggml_tensor * a = lora.first->get_copy(lw->a, buft, *moe_cache);
+                ggml_tensor * b = a != nullptr ? lora.first->get_copy(lw->b, buft, *moe_cache) : nullptr;
                 if (b != nullptr) {
                     lora_a = a;
                     lora_b = b;
