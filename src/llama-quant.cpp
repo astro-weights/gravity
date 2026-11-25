@@ -1079,7 +1079,6 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         }
     }
 
-    const size_t align = GGUF_DEFAULT_ALIGNMENT;
     gguf_context_ptr ctx_out { gguf_init_empty() };
 
     std::vector<int> prune_list = {};
@@ -1434,7 +1433,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             GGML_ASSERT(gguf_get_tensor_size(ctx_outs[cur_split].get(), gguf_find_tensor(ctx_outs[cur_split].get(), metadata[i].name.c_str())) == new_size);
 
             // tensor data is already written, add the padding
-            zeros(fout, GGML_PAD(new_size, align) - new_size);
+            zeros(fout, GGML_PAD(new_size, gguf_get_alignment(ctx_outs[cur_split].get())) - new_size); // gravity: per-shard ctx alignment (only shard 0 carries general.alignment)
 
             // unmap the tensor to free memory
             if (ml.use_mmap) { ml.unmap_weight(weight); }

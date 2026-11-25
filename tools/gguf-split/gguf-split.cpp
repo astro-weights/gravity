@@ -258,7 +258,7 @@ struct split_strategy {
         for (int i = 0; i < n_tensors; ++i) {
             struct ggml_tensor * t = ggml_get_tensor(ctx_meta, gguf_get_tensor_name(ctx_gguf, i));
             // calculate the "imaginary" size = the current size + next tensor size
-            size_t n_bytes = GGML_PAD(ggml_nbytes(t), GGUF_DEFAULT_ALIGNMENT);
+            size_t n_bytes = GGML_PAD(ggml_nbytes(t), gguf_get_alignment(ctx_out)); // gravity: split ctx alignment, not the default
             size_t next_tensors_size = curr_tensors_size + n_bytes;
             if (should_split(i, next_tensors_size)) {
                 new_ctx_out(false);
@@ -345,7 +345,7 @@ struct split_strategy {
 
                 // copy tensor from input to output file
                 copy_file_to_file(f_input, fout, offset, n_bytes);
-                zeros(fout, GGML_PAD(n_bytes, GGUF_DEFAULT_ALIGNMENT) - n_bytes);
+                zeros(fout, GGML_PAD(n_bytes, gguf_get_alignment(ctx_out)) - n_bytes); // gravity: pad like the header says
             }
 
             printf("done\n");
@@ -579,7 +579,7 @@ static void gguf_merge(const split_params & split_params) {
             if (!split_params.dry_run) {
                 // write tensor data + padding
                 fout.write((const char *)read_data.data(), n_bytes);
-                zeros(fout, GGML_PAD(n_bytes, GGUF_DEFAULT_ALIGNMENT) - n_bytes);
+                zeros(fout, GGML_PAD(n_bytes, gguf_get_alignment(ctx_out)) - n_bytes); // gravity: pad like the header says
             }
         }
 
