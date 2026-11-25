@@ -7,7 +7,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -1436,6 +1438,131 @@ static std::pair<int, int> test_gguf_set_kv(ggml_backend_dev_t dev, const unsign
     return std::make_pair(npass, ntest);
 }
 
+// gravity: general.alignment set/removed on a ctx must change how the writer pads
+struct align_tensors {
+    ggml_context * ctx = nullptr;
+    std::vector<ggml_tensor *> ts;
+    align_tensors() {
+        ggml_init_params ip = { 1 << 20, nullptr, false };
+        ctx = ggml_init(ip);
+        const int64_t ne[] = { 10, 100, 7, 1000 }; // F32 elements, none a multiple of 4096 bytes
+        for (size_t i = 0; i < 4; i++) {
+            ggml_tensor * t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, ne[i]);
+            ggml_format_name(t, "t%zu", i);
+            for (int64_t j = 0; j < ne[i]; j++) {
+                ((float *) t->data)[j] = (float) (i * 10000 + j);
+            }
+            ts.push_back(t);
+        }
+    }
+    ~align_tensors() { ggml_free(ctx); }
+    void add_all(gguf_context * g) const {
+        for (ggml_tensor * t : ts) {
+            gguf_add_tensor(g, t);
+        }
+    }
+};
+
+// writes g to a buffer, reads it back with stock gguf_init_from_buffer, checks alignment and data
+static bool check_aligned_roundtrip(const char * tag, gguf_context * g, const align_tensors & src, size_t expect_align) {
+    bool ok = true;
+    if (gguf_get_alignment(g) != expect_align) {
+        printf("%s: ctx alignment %zu != %zu\n", tag, gguf_get_alignment(g), expect_align);
+        ok = false;
+    }
+    std::vector<int8_t> buf;
+    gguf_write_to_buf(g, buf, false);
+
+    ggml_context * ctx_data = nullptr;
+    gguf_init_params gp = { /*no_alloc =*/ false, &ctx_data };
+    gguf_context * r = gguf_init_from_buffer(buf.data(), buf.size(), gp);
+    if (!r) {
+        printf("%s: written file does not load\n", tag);
+        return false;
+    }
+    if (gguf_get_alignment(r) != expect_align || gguf_get_n_tensors(r) != (int64_t) src.ts.size()) {
+        printf("%s: read alignment %zu / n_tensors %" PRId64 " mismatch\n", tag, gguf_get_alignment(r), gguf_get_n_tensors(r));
+        ok = false;
+    }
+    for (int64_t i = 0; i < gguf_get_n_tensors(r) && i < (int64_t) src.ts.size(); i++) {
+        if (gguf_get_tensor_offset(r, i) % expect_align != 0) {
+            printf("%s: tensor %" PRId64 " offset %zu not aligned to %zu\n", tag, i, gguf_get_tensor_offset(r, i), expect_align);
+            ok = false;
+        }
+        const ggml_tensor * t = ggml_get_tensor(ctx_data, gguf_get_tensor_name(r, i));
+        if (!t || ggml_nbytes(t) != ggml_nbytes(src.ts[i]) || memcmp(t->data, src.ts[i]->data, ggml_nbytes(t)) != 0) {
+            printf("%s: tensor %" PRId64 " data differs\n", tag, i);
+            ok = false;
+        }
+    }
+    gguf_free(r);
+    ggml_free(ctx_data);
+    return ok;
+}
+
+static std::pair<int, int> test_gguf_alignment() {
+    int npass = 0;
+    int ntest = 0;
+    auto record = [&](const char * tag, bool ok) {
+        printf("%s: %s: %s\n", __func__, tag, ok ? "\033[1;32mOK\033[0m" : "\033[1;31mFAIL\033[0m");
+        npass += ok;
+        ntest++;
+    };
+    align_tensors src;
+
+    {   // key set before adding tensors
+        gguf_context * g = gguf_init_empty();
+        gguf_set_val_u32(g, GGUF_KEY_GENERAL_ALIGNMENT, 4096);
+        src.add_all(g);
+        record("set_before_tensors", check_aligned_roundtrip("set_before_tensors", g, src, 4096));
+        gguf_free(g);
+    }
+    {   // key set after adding tensors: offsets must be recomputed
+        gguf_context * g = gguf_init_empty();
+        src.add_all(g);
+        gguf_set_val_u32(g, GGUF_KEY_GENERAL_ALIGNMENT, 4096);
+        record("set_after_tensors", check_aligned_roundtrip("set_after_tensors", g, src, 4096));
+        gguf_free(g);
+    }
+    {   // changing the value again, then removing the key resets to the default
+        gguf_context * g = gguf_init_empty();
+        src.add_all(g);
+        gguf_set_val_u32(g, GGUF_KEY_GENERAL_ALIGNMENT, 4096);
+        gguf_set_val_u32(g, GGUF_KEY_GENERAL_ALIGNMENT, 64);
+        bool ok = check_aligned_roundtrip("set_64", g, src, 64);
+        gguf_remove_key(g, GGUF_KEY_GENERAL_ALIGNMENT);
+        ok = check_aligned_roundtrip("remove_key", g, src, GGUF_DEFAULT_ALIGNMENT) && ok;
+        record("change_and_remove", ok);
+        gguf_free(g);
+    }
+    {   // removing a key that is not there leaves a custom-less ctx alone
+        gguf_context * g = gguf_init_empty();
+        src.add_all(g);
+        gguf_remove_key(g, GGUF_KEY_GENERAL_ALIGNMENT);
+        record("no_key_unchanged", check_aligned_roundtrip("no_key_unchanged", g, src, GGUF_DEFAULT_ALIGNMENT));
+        gguf_free(g);
+    }
+    {   // what llama-quantize / gguf-split do: gguf_set_kv from a 4096 file, then add tensors
+        gguf_context * a = gguf_init_empty();
+        gguf_set_val_u32(a, GGUF_KEY_GENERAL_ALIGNMENT, 4096);
+        gguf_set_val_str(a, "general.architecture", "test");
+        src.add_all(a);
+        std::vector<int8_t> buf;
+        gguf_write_to_buf(a, buf, false);
+        gguf_free(a);
+        gguf_init_params gp = { /*no_alloc =*/ true, nullptr };
+        gguf_context * in = gguf_init_from_buffer(buf.data(), buf.size(), gp);
+
+        gguf_context * out = gguf_init_empty();
+        gguf_set_kv(out, in);
+        src.add_all(out);
+        record("set_kv_from_4096", in && check_aligned_roundtrip("set_kv_from_4096", out, src, 4096));
+        gguf_free(out);
+        gguf_free(in);
+    }
+    return std::make_pair(npass, ntest);
+}
+
 static void print_usage() {
     printf("usage: test-gguf [seed]\n");
     printf("  if no seed is unspecified then a random seed is used\n");
@@ -1458,6 +1585,12 @@ int main(int argc, char ** argv) {
     int ntest = 0;
     {
         std::pair<int, int> result = test_handcrafted_file(seed);
+        npass += result.first;
+        ntest += result.second;
+    }
+
+    {
+        std::pair<int, int> result = test_gguf_alignment();
         npass += result.first;
         ntest += result.second;
     }

@@ -66,17 +66,6 @@ bool find_key(const gguf_context * ctx, const char * key, gguf_type type, bool a
     return gguf_get_kv_type(ctx, id) == type;
 }
 
-// gguf_set_val_u32(general.alignment) does not change ctx->alignment, only a file/buffer read does.
-// So build the output context from a tiny buffer that carries the key.
-gguf_ptr make_aligned_ctx() {
-    gguf_ptr boot(gguf_init_empty());
-    gguf_set_val_u32(boot.get(), GGUF_KEY_GENERAL_ALIGNMENT, REPACK_ALIGNMENT);
-    std::vector<char> buf(gguf_get_meta_size(boot.get()));
-    gguf_get_meta_data(boot.get(), buf.data());
-    gguf_init_params params = { /*no_alloc =*/ true, /*ctx =*/ nullptr };
-    return gguf_ptr(gguf_init_from_buffer(buf.data(), buf.size(), params));
-}
-
 struct moe_tensor {
     int64_t  id     = 0;
     uint64_t stride = 0;
@@ -171,16 +160,19 @@ status repack_to(const std::string & in_path, const std::string & tmp_path) {
         }
     }
 
-    gguf_ptr dst = make_aligned_ctx();
-    if (!dst || gguf_get_alignment(dst.get()) != REPACK_ALIGNMENT) {
-        return { "cannot create aligned GGUF context" };
+    gguf_ptr dst(gguf_init_empty());
+    if (!dst) {
+        return { "cannot create GGUF context" };
     }
     gguf_set_kv(dst.get(), src.ctx.get());
     // drop old index so repacking a repacked file gives the same bytes
     for (const char * key : { KEY_VERSION, KEY_TENSORS, KEY_OFFSETS, KEY_STRIDES, KEY_N_EXPERT }) {
         gguf_remove_key(dst.get(), key);
     }
-    gguf_set_val_u32(dst.get(), GGUF_KEY_GENERAL_ALIGNMENT, REPACK_ALIGNMENT);
+    gguf_set_val_u32(dst.get(), GGUF_KEY_GENERAL_ALIGNMENT, REPACK_ALIGNMENT); // also sets ctx alignment (gravity: gguf.cpp)
+    if (gguf_get_alignment(dst.get()) != REPACK_ALIGNMENT) {
+        return { "cannot set GGUF alignment" };
+    }
     for (int64_t i = 0; i < n_tensors; i++) {
         const ggml_tensor * t = ggml_get_tensor(src.data.get(), gguf_get_tensor_name(src.ctx.get(), i));
         if (!t) {

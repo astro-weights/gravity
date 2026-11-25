@@ -51,22 +51,13 @@ static const tensor_spec SPECS[] = {
     { "blk.1.ffn_down_exps.weight",     GGML_TYPE_Q8_0, { 32, 3, N_EXPERT }, 3 },
 };
 
-// align 0 = writer default (32). gguf_set_val_u32(general.alignment) alone does not change how the
-// writer pads, so a non-default alignment needs a ctx that was read back from a buffer carrying the key
+// align 0 = writer default (32)
 static bool write_gguf(const std::string & path, const std::vector<tensor_spec> & specs, uint32_t align = 0) {
     ggml_init_params ip = { 1 << 20, nullptr, false };
     ggml_context *   ctx = ggml_init(ip);
-    gguf_context *   g   = nullptr;
+    gguf_context *   g   = gguf_init_empty();
     if (align) {
-        gguf_context * boot = gguf_init_empty();
-        gguf_set_val_u32(boot, "general.alignment", align);
-        std::vector<char> buf(gguf_get_meta_size(boot));
-        gguf_get_meta_data(boot, buf.data());
-        gguf_free(boot);
-        gguf_init_params gp = { true, nullptr };
-        g                   = gguf_init_from_buffer(buf.data(), buf.size(), gp);
-    } else {
-        g = gguf_init_empty();
+        gguf_set_val_u32(g, "general.alignment", align);
     }
     gguf_set_val_str(g, "general.architecture", "testmoe");
     gguf_set_val_u32(g, "testmoe.expert_count", N_EXPERT);
@@ -372,33 +363,60 @@ static void test_errors(const fs::path & dir) {
     CHECK(!read_expert_index((dir / "missing.gguf").string(), idx).ok());
 }
 
-// quantize/split copy KVs with gguf_set_kv but lay tensors out with their own alignment: index must not be trusted
+// copies rp the way llama-quantize / gguf-split do (gguf_set_kv + add tensors). retype_name, when set,
+// is rewritten as F32 of the same shape, a real size change like a requantization
+static bool copy_like_quantize(const std::string & rp, const std::string & out, const char * retype_name) {
+    loaded a(rp);
+    if (!a.g) {
+        return false;
+    }
+    ggml_init_params ip   = { 1 << 20, nullptr, false };
+    ggml_context *   ctx2 = ggml_init(ip);
+    gguf_context *   g    = gguf_init_empty();
+    gguf_set_kv(g, a.g); // carries general.alignment = 4096 and the index keys
+    for (int64_t i = 0; i < gguf_get_n_tensors(a.g); i++) {
+        const char *  name = gguf_get_tensor_name(a.g, i);
+        ggml_tensor * t    = ggml_get_tensor(a.ctx, name);
+        if (retype_name && !strcmp(name, retype_name)) {
+            t = ggml_new_tensor(ctx2, GGML_TYPE_F32, ggml_n_dims(t), t->ne);
+            ggml_set_name(t, name);
+            memset(t->data, 0, ggml_nbytes(t));
+        }
+        gguf_add_tensor(g, t);
+    }
+    const bool ok = gguf_write_to_file(g, out.c_str(), false);
+    gguf_free(g);
+    ggml_free(ctx2);
+    return ok;
+}
+
+// quantize/split of a repacked file: the copy must load (header alignment matches the padding);
+// the index stays valid for an identity copy and goes stale once a tensor changes size
 static void test_stale_index(const fs::path & dir) {
-    const std::string in  = (dir / "s_in.gguf").string();
-    const std::string rp  = (dir / "s_rp.gguf").string();
-    const std::string bad = (dir / "s_bad.gguf").string();
+    const std::string in   = (dir / "s_in.gguf").string();
+    const std::string rp   = (dir / "s_rp.gguf").string();
+    const std::string same = (dir / "s_same.gguf").string();
+    const std::string bad  = (dir / "s_bad.gguf").string();
     CHECK(write_synthetic(in, true));
     CHECK(repack_gguf(in, rp).ok());
     expert_index idx;
     CHECK(read_expert_index(rp, idx).ok());
 
-    loaded a(rp);
-    CHECK(a.g != nullptr);
-    if (!a.g) {
-        return;
+    CHECK(copy_like_quantize(rp, same, nullptr));
+    {
+        loaded b(same);
+        CHECK(b.g != nullptr);
+        if (b.g) {
+            CHECK(gguf_get_alignment(b.g) == 4096);
+        }
+        CHECK(slurp(same) == slurp(rp));
     }
-    gguf_context * g = gguf_init_empty(); // 32-aligned ctx, like llama-quantize / gguf-split
-    gguf_set_kv(g, a.g);
-    gguf_remove_key(g, "general.alignment"); // else the header claims 4096 and gguf_init rejects the file
-    for (int64_t i = 0; i < gguf_get_n_tensors(a.g); i++) {
-        gguf_add_tensor(g, ggml_get_tensor(a.ctx, gguf_get_tensor_name(a.g, i)));
-    }
-    CHECK(gguf_write_to_file(g, bad.c_str(), false));
-    gguf_free(g);
+    CHECK(read_expert_index(same, idx).ok());
 
-    loaded b(bad);
-    CHECK(b.g != nullptr);
-    CHECK(gguf_find_key(b.g, "gravity.expert_index.offsets") >= 0); // keys survived the copy
+    CHECK(copy_like_quantize(rp, bad, "blk.0.ffn_up_exps.weight"));
+    loaded c(bad);
+    CHECK(c.g != nullptr);
+    CHECK(gguf_find_key(c.g, "gravity.expert_index.offsets") >= 0); // keys survived the copy
     status st = read_expert_index(bad, idx);
     CHECK(!st.ok());
     CHECK(st.error.find("stale") != std::string::npos);
