@@ -30,7 +30,7 @@ jobs:
           - name: address-undefined
             flags: -DLLAMA_SANITIZE_ADDRESS=ON -DLLAMA_SANITIZE_UNDEFINED=ON
           - name: thread
-            flags: -DLLAMA_SANITIZE_THREAD=ON
+            flags: -DLLAMA_SANITIZE_THREAD=ON -DGGML_SANITIZE_THREAD=ON -DGGML_OPENMP=OFF
     name: sanitize (${{ matrix.name }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
